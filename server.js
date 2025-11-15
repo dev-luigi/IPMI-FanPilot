@@ -22,7 +22,7 @@ const PUBLIC_DIR = path.join(APP_DIR, 'public');
 
 const INDEX_FILE = path.join(PUBLIC_DIR, 'index.html');
 
-const CREDENTIALS_FILE = path.join(APP_DIR, 'credenziali.json');
+const CREDENTIALS_FILE = path.join(APP_DIR, 'credentials.json');
 
 // Encryption key (generated on first run)
 

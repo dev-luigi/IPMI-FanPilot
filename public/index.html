@@ -531,7 +531,6 @@
     const logContainer = document.getElementById('logContainer');
     const presetBtns = document.querySelectorAll('.preset-btn');
 
-    // Carica credenziali all'avvio
     async function loadCredentials() {
       try {
         const response = await fetch('/api/credentials/load');
@@ -548,7 +547,6 @@
       }
     }
 
-    // Salva credenziali
     saveCredBtn.addEventListener('click', async () => {
       const ip = document.getElementById('ipAddress').value;
       const username = document.getElementById('username').value;
@@ -579,7 +577,6 @@
       }
     });
 
-    // Cancella credenziali
     clearCredBtn.addEventListener('click', async () => {
       if (!confirm('Clear saved credentials?')) return;
 
