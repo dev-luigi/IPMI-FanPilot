@@ -46,20 +46,6 @@ This will create a node_modules folder containing Express.js and all other depen
 
 ---
 
-## Configuration
-
-Create a file named credentials.json in the root directory (same folder as server.js) with your IPMI credentials:
-
-    {
-      "ip": "192.168.x.x",
-      "username": "root",
-      "password": "calvin"
-    }
-
-Alternatively, use the web interface to save credentials by entering them in the Connection Settings section and clicking the green "Save" button. Credentials are automatically encrypted with AES-256 encryption.
-
----
-
 ## Running the Application
 
 ### Using the Start Script (Windows - Recommended)
@@ -86,33 +72,63 @@ The server will start on port 3000. Open your browser and go to:
 
 ---
 
-## Usage
+## First Time Setup
 
-1. Open the application in your web browser at http://localhost:3000
+On your first launch:
+
+1. Open http://localhost:3000 in your browser
 2. Enter your server IPMI credentials:
    - IP iDRAC: The IP address of your server management interface
    - Username: IPMI username (usually 'root')
    - Password: IPMI password
-3. Click the green "Save" button to store credentials locally (encrypted)
+3. Click the green "Save" button
+4. The credentials are automatically encrypted and saved to credentials.json
+
+**Important:** The credentials.json file is encrypted with AES-256 encryption and is unreadable without the application's decryption key. You do not need to manually create this file.
+
+---
+
+## Usage
+
+1. Open the application in your web browser at http://localhost:3000
+2. On first run, enter your server IPMI credentials and click "Save"
+3. On subsequent runs, your credentials will load automatically from the encrypted file
 4. Use the dial to adjust fan speed from 0-100%
 5. Click "Confirm" to apply manual speed settings
 6. Click "Auto Mode" to let the server control fans automatically
 7. View command history at the bottom to verify execution
-8. Click the red "Clear" button to delete saved credentials
+8. Click the red "Clear" button to delete saved credentials (you'll need to re-enter them next time)
 
 ---
 
 ## Project Structure
 
     IPMI-FanPilot/
-    ├── server.js              Main Node.js application
-    ├── package.json           Project dependencies
-    ├── start.bat              Windows startup script
-    ├── credentials.json       Saved credentials (created after first save, encrypted)
+    ├── server.js                 Main Node.js application
+    ├── package.json              Project dependencies
+    ├── package-lock.json         Dependency lock file
+    ├── start.bat                 Windows startup script
+    ├── README.md                 This file
+    ├── LICENSE                   MIT or Apache-2.0 license
+    ├── .gitignore                Git ignore configuration
+    │
     ├── public/
-    │   └── index.html         Web interface
-    ├── README.md              This file
-    └── LICENSE                MIT or Apache-2.0 license
+    │   └── index.html            Web interface dashboard
+    │
+    └── credentials.json          Encrypted credentials (auto-generated)
+                                   *This file is created automatically on first save*
+                                   *Not included in repository for security*
+
+---
+
+## Security Features
+
+- **Encrypted Storage:** Credentials are encrypted using AES-256-CBC encryption
+- **No Plain Text:** No credentials stored in plain text on disk
+- **Unique IV:** Each encryption uses a unique Initialization Vector
+- **Input Validation:** IPMI commands protected against injection attacks
+- **Secure Execution:** Commands executed through PowerShell with validation
+- **Auto-Generated File:** credentials.json is created automatically, no manual setup needed
 
 ---
 
@@ -120,21 +136,11 @@ The server will start on port 3000. Open your browser and go to:
 
 The application provides the following API endpoints:
 
-- POST /api/execute - Execute IPMI fan commands (manual or auto mode)
-- POST /api/credentials/save - Save connection credentials (encrypted)
-- GET /api/credentials/load - Load saved credentials (decrypted)
-- DELETE /api/credentials/clear - Delete saved credentials
-- GET /api/health - Server health check
-
----
-
-## Security Features
-
-- Credentials are encrypted using AES-256-CBC encryption
-- No plain text credentials stored on disk
-- Unique IV (Initialization Vector) for each encryption operation
-- Input validation to prevent IPMI command injection
-- IPMI commands are executed through PowerShell for better security
+- `POST /api/execute` - Execute IPMI fan commands (manual or auto mode)
+- `POST /api/credentials/save` - Save connection credentials (encrypted)
+- `GET /api/credentials/load` - Load saved credentials (decrypted)
+- `DELETE /api/credentials/clear` - Delete saved credentials
+- `GET /api/health` - Server health check
 
 ---
 
@@ -196,26 +202,13 @@ Ensure IPMI is enabled and accessible on your network.
 - Automatic mode (server manages fan speed)
 - Preset speed buttons (20%, 30%, 50%, 70%, 100%)
 - Secure credential storage (AES-256 encryption)
-- Save/load/clear credentials
+- Save/load/clear credentials automatically
 - Command history log
 - Real-time status messages
 - Responsive design for desktop and tablet
 - Error handling with clear messages
 - Administrator privilege detection
-
----
-
-## Future Enhancements
-
-Potential features for future releases:
-
-- Multi-server management
-- Temperature monitoring and graphs
-- Scheduled fan control
-- Email notifications
-- User authentication
-- API key management
-- Mobile app
+- No credential configuration needed (auto-generated and encrypted)
 
 ---
 
