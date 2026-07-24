@@ -11,7 +11,7 @@
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-D22128?logo=apache&logoColor=white"></a>
   <a href="https://hub.docker.com/r/devluigi06/ipmideck"><img alt="Docker Hub pulls" src="https://img.shields.io/docker/pulls/devluigi06/ipmideck?logo=docker&logoColor=white&label=Docker%20pulls&color=2496ED"></a>
   <a href="https://pypi.org/project/ipmideck/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/ipmideck?logo=pypi&logoColor=white&label=PyPI&color=FFD43B"></a>
-  <img alt="Supported BMCs: Dell, Supermicro, IBM, HPE, Lenovo" src="https://img.shields.io/badge/BMC-Dell%20%7C%20Supermicro%20%7C%20IBM%20%7C%20HPE%20%7C%20Lenovo-06B6D4">
+  <img alt="Supported BMCs: Dell, Supermicro, IBM, HPE, Lenovo, Generic" src="https://img.shields.io/badge/BMC-Dell%20%7C%20Supermicro%20%7C%20IBM%20%7C%20HPE%20%7C%20Lenovo%20%7C%20Generic-06B6D4">
 </p>
 
 <p align="center"><strong>Documentation:</strong> <a href="https://docs.ipmideck.com">docs.ipmideck.com</a></p>
@@ -267,7 +267,9 @@ ipmideck/
 ## Security
 
 - Local authentication with bcrypt password hashing
-- Opaque session tokens, HMAC-SHA256 signed with a per-install secret, with configurable expiry
+- Opaque session tokens, HMAC-SHA256 signed with a per-install secret, with configurable
+  expiry (`IPMIDECK_AUTH_SESSION_EXPIRY` / the `auth.session_expiry` config key — e.g. `24h`,
+  `90m`, `1h`; default `24h`)
 - BMC credentials encrypted at rest with AES-256-CBC. The 32-byte key is randomly generated and
   stored in `<data_dir>/encryption.key` — deliberately **outside** the database, so a stolen DB
   alone decrypts nothing (back the key file up separately)
