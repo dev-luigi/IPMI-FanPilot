@@ -667,3 +667,49 @@ def test_demo_dell_write_echoes_argv_to_command_log(client):
     assert resp.json()["success"] is True
     detail = _latest_log_text(client, server_id)
     assert "0x30 0x30 0x02 0xff" in detail, detail
+
+
+# --- SX0-B: /status must not report a false 'fanpilot active' for monitoring-only vendors ----
+
+
+def _enable_fanpilot_in_db(server_id: str) -> None:
+    """Flip servers.fanpilot_enabled=1 directly on the live lifespan DB (mirrors conftest)."""
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(
+        bm.db.execute("UPDATE servers SET fanpilot_enabled=1 WHERE id=?", (server_id,))
+    )
+    loop.run_until_complete(bm.db.commit())
+
+
+def test_status_monitoring_only_vendor_reports_auto_not_fanpilot(client):
+    """HPE (is_fan_capable False) + fanpilot_enabled + cached 'auto' -> /status mode == 'auto'.
+
+    Without the SX0-B guard the cold-start fallback would overwrite 'auto' -> 'fanpilot' even
+    though HPE has no IPMI fan control, so /status would falsely claim FanPilot is driving fans.
+    """
+    from backend.modules.fanpilot.tasks import set_last_state
+
+    server_id = _create_server(client, "hpe", "192.0.2.80")
+    _enable_fanpilot_in_db(server_id)
+    set_last_state(server_id, "auto")  # cache at its default 'auto'
+
+    resp = client.get(f"/api/modules/fanpilot/{server_id}/status")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["enabled"] is True
+    assert body["mode"] == "auto", "monitoring-only vendor must NOT report a false 'fanpilot active'"
+
+
+def test_status_fan_capable_vendor_still_reports_fanpilot(client):
+    """Companion: a fan-capable vendor (dell) with the same setup still resolves 'fanpilot'."""
+    from backend.modules.fanpilot.tasks import set_last_state
+
+    server_id = _create_server(client, "dell", "192.0.2.81")
+    _enable_fanpilot_in_db(server_id)
+    set_last_state(server_id, "auto")
+
+    resp = client.get(f"/api/modules/fanpilot/{server_id}/status")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["enabled"] is True
+    assert body["mode"] == "fanpilot", "fan-capable vendor keeps the cold-start 'fanpilot' fallback"
