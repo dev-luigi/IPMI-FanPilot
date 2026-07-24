@@ -21,12 +21,17 @@ from backend.core.database import Database
 
 logger = logging.getLogger("ipmideck.auth")
 
-SESSION_EXPIRY_SECONDS = 86400  # 24h default
+SESSION_EXPIRY_SECONDS = 86400  # 24h — fallback default when config supplies no/invalid value
 
 
 class AuthManager:
     def __init__(self, db: Database):
         self.db = db
+        # SX0-A: session-token / cookie lifetime in seconds. Defaults to the 24h fallback
+        # constant; main.py lifespan overwrites it from config.auth.session_expiry
+        # (IPMIDECK_AUTH_SESSION_EXPIRY) via parse_duration_seconds. Kept == the module
+        # constant by default so the auth_manager fixture (no config) stays at 24h.
+        self.session_expiry_seconds: int = SESSION_EXPIRY_SECONDS
         # Session-token HMAC signing secret (kept in memory after initialize()).
         # Persisted separately under app_config['session_secret'] — distinct from the
         # at-rest credential encryption key, which lives in data/encryption.key.
@@ -398,7 +403,7 @@ class AuthManager:
         payload = {
             "sub": username,
             "iat": int(time.time()),
-            "exp": int(time.time()) + SESSION_EXPIRY_SECONDS,
+            "exp": int(time.time()) + self.session_expiry_seconds,
         }
         data = json.dumps(payload, separators=(",", ":"))
         sig = hmac.new(self._secret.encode(), data.encode(), hashlib.sha256).hexdigest()

@@ -11,7 +11,7 @@ from backend.core.i18n import get_lang, t
 router = APIRouter()
 
 
-def _set_session_cookie(response: Response, request: Request, token: str) -> None:
+def _set_session_cookie(response: Response, request: Request, token: str, max_age: int) -> None:
     """Issue the session cookie, setting secure=True when the request arrived over HTTPS.
 
     Decision R (04-W4-03): all three cookie issuers (login / setup / configure) route through
@@ -19,13 +19,17 @@ def _set_session_cookie(response: Response, request: Request, token: str) -> Non
     request.url.scheme == "https" — true when uvicorn terminates TLS (config.server.https on)
     or a TLS-terminating reverse proxy forwards the scheme. On plain HTTP it stays False so
     LAN-only HTTP deployments keep working.
+
+    SX0-A: ``max_age`` is the configured session lifetime in seconds
+    (auth.session_expiry_seconds), so the cookie Max-Age matches the token exp instead of a
+    hardcoded 24h.
     """
     response.set_cookie(
         key="session",
         value=token,
         httponly=True,
         samesite="lax",
-        max_age=86400,
+        max_age=max_age,
         secure=request.url.scheme == "https",
     )
 
@@ -122,7 +126,7 @@ async def login(body: LoginRequest, request: Request, response: Response, lang: 
     # 3. Success: clear any prior failure counter, issue session.
     await auth.reset_failures(body.username)
     token = auth.create_session_token(body.username)
-    _set_session_cookie(response, request, token)
+    _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
 
@@ -139,7 +143,7 @@ async def setup(body: SetupRequest, request: Request, response: Response, lang: 
         return {"success": False, "error": t("user_already_exists", lang)}
     await auth.create_user(body.username, body.password)
     token = auth.create_session_token(body.username)
-    _set_session_cookie(response, request, token)
+    _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
 
@@ -161,7 +165,7 @@ async def configure_auth(body: ConfigureRequest, request: Request, response: Res
         return {"success": False, "error": str(e)}
     await auth.set_auth_enabled(True)
     token = auth.create_session_token(body.username)
-    _set_session_cookie(response, request, token)
+    _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
 
