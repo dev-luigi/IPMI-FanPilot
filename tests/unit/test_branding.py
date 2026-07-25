@@ -11,6 +11,7 @@ asyncio_mode="auto" (pyproject) => async tests need NO decorator. These tests ar
 
 from __future__ import annotations
 
+import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -71,11 +72,12 @@ def test_health_version_literal_absent_from_source():
 
 
 def test_fallback_is_pep440_canonical():
-    """The single edited literal is the PEP 440 canonical form (stable "2.0.0").
-    Pure string assert — `packaging` is intentionally NOT imported (not a declared runtime dep).
-    Canonical form keeps tag == dist == METADATA == metadata-action semver with zero per-surface
-    normalization (D-03)."""
-    assert branding._VERSION_FALLBACK == "2.0.0"
+    """The fallback literal is a PEP 440 canonical X.Y.Z release version (shape, not a pinned
+    literal — so a future _VERSION_FALLBACK bump stays committable through the pre-commit hook
+    + CI gate). Pure regex assert — `packaging` is intentionally NOT imported (not a declared
+    runtime dep). Canonical X.Y.Z keeps tag == dist == METADATA == metadata-action semver with
+    zero per-surface normalization (D-03)."""
+    assert re.fullmatch(r"\d+\.\d+\.\d+", branding._VERSION_FALLBACK)
 
 
 def test_version_fallback_when_uninstalled(monkeypatch):
@@ -85,12 +87,17 @@ def test_version_fallback_when_uninstalled(monkeypatch):
     def _raise(_name):
         raise PackageNotFoundError(_name)
     monkeypatch.setattr("backend.core.branding.version", _raise)
-    # Re-run the same resolution the module performs at import time:
+    # Re-run the same resolution the module performs at import time. Prove the fallback branch
+    # was ACTUALLY taken (else the assert is vacuous — resolved IS _VERSION_FALLBACK there).
+    took_fallback = False
     try:
         resolved = branding.version("ipmideck")
     except PackageNotFoundError:
+        took_fallback = True
         resolved = branding._VERSION_FALLBACK
-    assert resolved == branding._VERSION_FALLBACK == "2.0.0"
+    assert took_fallback, "resolver should hit the PackageNotFoundError fallback path"
+    assert resolved == branding._VERSION_FALLBACK
+    assert re.fullmatch(r"\d+\.\d+\.\d+", resolved)
 
 
 def test_version_matches_installed_dist():

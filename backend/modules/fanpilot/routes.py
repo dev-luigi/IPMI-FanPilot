@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from backend.core.i18n import get_lang, t
+from backend.core.ipmi_service import is_fan_capable
 from backend.modules import get_ctx
 from backend.modules.fanpilot.tasks import get_last_state, set_last_state, wake_loop
 from backend.modules.sensors.tasks import wake_loop as wake_sensor_loop
@@ -152,7 +153,8 @@ async def delete_profile(profile_id: int, lang: str = Depends(get_lang)):
 async def get_fanpilot_status(server_id: str, lang: str = Depends(get_lang)):
     ctx = get_ctx()  # Fresh lookup — live ctx (Decision J)
     server = await ctx.db.fetchone(
-        "SELECT fanpilot_enabled, fanpilot_profile_id FROM servers WHERE id = ?", (server_id,)
+        "SELECT fanpilot_enabled, fanpilot_profile_id, vendor FROM servers WHERE id = ?",
+        (server_id,),
     )
     if not server:
         return {"success": False, "error": t("server_not_found", lang)}
@@ -168,7 +170,10 @@ async def get_fanpilot_status(server_id: str, lang: str = Depends(get_lang)):
     # FanPilot is enabled, trust the DB (the loop will refresh `speed_pct` shortly).
     cached = get_last_state(server_id)
     mode = cached["mode"]
-    if mode == "auto" and server["fanpilot_enabled"]:
+    # SX0-B: only report "fanpilot" for fan-capable vendors. A monitoring-only vendor (HPE,
+    # Lenovo, generic) never has FanPilot actively driving fans, so reporting "fanpilot" would
+    # be a false-active. Default a NULL/empty vendor to "dell" to match /mode's Decision G.
+    if mode == "auto" and server["fanpilot_enabled"] and is_fan_capable(server["vendor"] or "dell"):
         mode = "fanpilot"
 
     return {

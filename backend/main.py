@@ -21,7 +21,13 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.core.auth import AuthManager, require_auth
 from backend.core.branding import APP_NAME, VERSION, credits_line, render_banner_safe
-from backend.core.config import AppConfig, load_config, save_default_config, update_server_yaml
+from backend.core.config import (
+    AppConfig,
+    load_config,
+    parse_duration_seconds,
+    save_default_config,
+    update_server_yaml,
+)
 from backend.core.logging_util import suppress_noisy_loggers
 from backend.core.database import Database
 from backend.core.modules import ModuleLoader
@@ -246,6 +252,11 @@ async def lifespan(app: FastAPI):
     # Initialize auth
     auth = AuthManager(db)
     await auth.initialize()
+    # SX0-A: thread the configured session lifetime (config.auth.session_expiry /
+    # IPMIDECK_AUTH_SESSION_EXPIRY) into BOTH the token exp and the cookie max_age. This is
+    # the single parse point; invalid values fall back to the 24h default without raising.
+    # Only consulted when auth is enabled — no change to the is_auth_enabled() gating.
+    auth.session_expiry_seconds = parse_duration_seconds(config.auth.session_expiry)
 
     # 08-04 (D-16): in demo mode, seed one synthetic server per canonical vendor so the
     # per-vendor journeys (tier badges, monitoring-only warnings, loop-skip, argv routing)

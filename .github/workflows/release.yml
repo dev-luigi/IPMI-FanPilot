@@ -161,7 +161,7 @@ jobs:
           repository: devluigi06/ipmideck
           readme-filepath: ./README.md
 
-  # ---- Draft GitHub Release (D-10) — user presses Publish ----
+  # ---- Draft GitHub Release (D-10) — body from CHANGELOG.md, user presses Publish ----
   release-draft:
     if: ${{ github.event_name == 'push' }}
     needs: [guard, tests]
@@ -169,8 +169,26 @@ jobs:
     permissions:
       contents: write            # required to create the release
     steps:
+      - uses: actions/checkout@v6
+      - name: Slice the CHANGELOG section for this tag into the release body
+        run: |
+          VER="${GITHUB_REF_NAME#v}"                 # v2.0.1 -> 2.0.1
+          # Emit the lines under `## [VER]` up to (not incl.) the next version header or the
+          # link-reference block. index()==1 is an exact prefix match, so the [ and . in the
+          # version string stay literal (no regex escaping needed).
+          awk -v hdr="## [$VER]" '
+            index($0, hdr) == 1     { f = 1; next }
+            /^## \[/                { f = 0 }
+            /^\[.*\]: http/         { f = 0 }
+            f
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for $VER — promote [Unreleased] before tagging."
+            exit 1
+          fi
+          echo "---- release body ----"; cat release-notes.md
       - uses: softprops/action-gh-release@v2
         with:
-          draft: true
-          generate_release_notes: true
+          draft: true                 # option B: body pre-filled from CHANGELOG, maintainer Publishes
+          body_path: release-notes.md
           # tag_name defaults to the pushed tag (github.ref_name)

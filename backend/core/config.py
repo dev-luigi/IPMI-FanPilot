@@ -3,10 +3,29 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_DURATION_RE = re.compile(r"^(\d+)([smhd]?)$")
+
+
+def parse_duration_seconds(value: str | int | None, default: int = 86400) -> int:
+    """Parse a duration like '24h', '90m', '1d', '45s', or a bare integer (seconds) into
+    seconds. Invalid / non-positive input returns ``default`` (never raises)."""
+    if value is None or isinstance(value, bool):
+        # bool is an int subclass — reject it explicitly so True/False can't slip through.
+        return default
+    if isinstance(value, int):
+        return value if value > 0 else default
+    match = _DURATION_RE.match(value.strip().lower())
+    if not match:
+        return default
+    seconds = int(match.group(1)) * _DURATION_UNITS[match.group(2) or "s"]
+    return seconds if seconds > 0 else default
 
 
 def _data_dir() -> Path:
