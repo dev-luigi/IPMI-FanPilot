@@ -14,7 +14,7 @@ APP_NAME = "IPMIDeck"  # 04.2 flips this single line
 # stable public release): tag == dist == METADATA == this literal, zero per-surface normalization
 # surprises. pyproject derives the wheel version from THIS via attr: (D-05).
 # Bump this + tag the same commit to cut a release (firing the tag is a USER action, D-21).
-_VERSION_FALLBACK = "2.0.0"
+_VERSION_FALLBACK = "2.0.1"
 
 # Runtime resolution (D-02): an installed dist (pip/Docker) reports what was ACTUALLY shipped;
 # a raw source checkout (`python -m backend.main`) falls back to the literal. The dist name

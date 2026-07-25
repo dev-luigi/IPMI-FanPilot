@@ -10,6 +10,8 @@ into a new dated `## [<version>] - YYYY-MM-DD` section.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-07-25
+
 ### Fixed
 
 - Session expiry is now honored. `IPMIDECK_AUTH_SESSION_EXPIRY` (and the `auth.session_expiry`
@@ -44,5 +46,6 @@ number of BMCs over ipmitool. Everything runs locally: SQLite on disk, no cloud,
   experimental; HPE, Lenovo, and unknown BMCs are monitoring-only (full sensors, power, SEL, and
   FRU, but no fan writes).
 
-[Unreleased]: https://github.com/ipmideck/IPMIDeck/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/ipmideck/IPMIDeck/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/ipmideck/IPMIDeck/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/ipmideck/IPMIDeck/compare/84df472...v2.0.0
