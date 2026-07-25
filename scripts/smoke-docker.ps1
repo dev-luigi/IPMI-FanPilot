@@ -2,6 +2,10 @@
 $ErrorActionPreference = "Stop"
 $img = "ipmideck:smoke"; $name = "ipmideck-smoke"; $vol = "ipmideck-smoke-data"
 $rev = (git rev-parse HEAD).Trim()
+# Version from the single source of truth (backend/core/branding.py) — no hardcoded literal, so a
+# bump needs no edit here. Same _VERSION_FALLBACK the wheel build and release.yml guard read.
+$ver = ([regex]::Match((Get-Content -Raw backend/core/branding.py), '_VERSION_FALLBACK\s*=\s*"([^"]+)"')).Groups[1].Value
+if (-not $ver) { throw "could not read _VERSION_FALLBACK from backend/core/branding.py" }
 
 # Host port for the smoke: prefer 3000, but fall back to a free ephemeral port if it is already
 # in use (e.g. another dev server holds 3000). The container always serves on its internal 3000,
@@ -14,7 +18,7 @@ if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyCon
 }
 
 # 1. build from clean checkout with the same build-args CI's metadata-action would pass
-docker build --build-arg VERSION=2.0.0 --build-arg REVISION=$rev -t $img .
+docker build --build-arg VERSION=$ver --build-arg REVISION=$rev -t $img .
 
 # 2. run demo mode, throwaway volume, PORT MAPPING (host networking is a no-op on Windows)
 # best-effort pre-clean of any leftover from a prior run — tolerate "not found" on a clean first
@@ -33,9 +37,9 @@ foreach ($i in 1..30) {
 }
 if (-not $ok) { throw "health never 200" }
 
-# 4. version consistency: /api/health reports 2.0.0 (wheel via importlib.metadata)
+# 4. version consistency: /api/health reports the branding version (wheel via importlib.metadata)
 $health = Invoke-RestMethod "http://localhost:$port/api/health"
-if ($health.version -ne "2.0.0") { throw "health version $($health.version) != 2.0.0" }
+if ($health.version -ne $ver) { throw "health version $($health.version) != $ver" }
 
 # 5. SPA served (index references hashed assets/)
 $root = (Invoke-WebRequest "http://localhost:$port/" -UseBasicParsing).Content
