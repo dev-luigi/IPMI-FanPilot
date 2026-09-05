@@ -391,6 +391,35 @@ app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"]
 app.include_router(module_router, prefix="/api/admin/modules", tags=["Modules"], dependencies=[Depends(require_auth)])
 
 
+def _resolve_spa_file(full_path: str, root: Path) -> Path | None:
+    """Return a contained, existing file under ``root``, or None to fall back to index.html.
+
+    SEC-01/F1: the SPA catch-all used to join user input onto the static root and serve
+    whatever ``is_file()`` accepted, so ``../../data/encryption.key`` and the SQLite
+    database were readable **without authentication**. Containment is decided on the
+    CANONICAL path (``resolve()`` collapses ``..`` and symlinks), so it holds regardless
+    of how the escape is spelled — ``%2e%2e%2f``, ``..%5c``, ``/C:/…``, double-encoded.
+
+    Three guards the naive fix misses:
+    - length cap: a multi-MB segment is pointless work in the hot catch-all, and a
+      leading ``//host/share`` UNC input can make ``resolve()`` block on a network lookup
+    - NUL byte: ``resolve()`` raises ``ValueError`` on Linux (``is_file()`` swallows it),
+      which would surface as an unhandled 500 rather than the SPA
+    - ``OSError``: a path that cannot be stat'ed must fall back, never propagate
+    """
+    if not full_path or len(full_path) > 1024:
+        return None
+    if "\x00" in full_path:
+        return None
+    try:
+        candidate = (root / full_path).resolve()
+    except (ValueError, OSError):
+        return None
+    if candidate.is_relative_to(root) and candidate.is_file():
+        return candidate
+    return None
+
+
 def _mount_spa(app: FastAPI) -> None:
     """Register static file serving and SPA fallback route.
 
@@ -420,15 +449,20 @@ def _mount_spa(app: FastAPI) -> None:
         from fastapi import HTTPException
 
         # Reject unmatched /api/* paths so disabled modules return 404 (not SPA).
+        # RETAINED deliberately: dropping this guard makes /api/health and every
+        # disabled-module route answer 200 index.html instead of 404, silently
+        # breaking the FIX-04 contract. Containment below does NOT replace it.
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
 
-        # Try to serve the exact file first (favicon.svg, etc.)
-        file_path = static_dir / full_path
-        if full_path and file_path.is_file():
-            return FileResponse(file_path)
+        # SEC-01/F1: serve the requested file only when it canonically resolves
+        # INSIDE the static root; anything else falls back to the SPA shell.
+        root = static_dir.resolve()
+        hit = _resolve_spa_file(full_path, root)
+        if hit is not None:
+            return FileResponse(hit)
         # Otherwise return index.html for React Router
-        return FileResponse(static_dir / "index.html")
+        return FileResponse(root / "index.html")
 
 
 # === CLI entry point ===
