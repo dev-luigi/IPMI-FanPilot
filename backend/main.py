@@ -497,6 +497,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # `serve` kept as a deprecated alias of `start` so existing docs/scripts keep working.
     subparsers.add_parser("serve", help="Start the server (deprecated alias of `start`)")
     subparsers.add_parser("reset-password", help="Reset admin password")
+    rotate_parser = subparsers.add_parser(
+        "rotate-session-secret",
+        help="Rotate the session-signing secret (logs out every session)",
+    )
+    rotate_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Skip the confirmation prompt (for non-interactive use)",
+    )
     return parser
 
 
@@ -637,6 +647,10 @@ def cli():
 
     if args.command == "reset-password":
         _reset_password()
+        return
+
+    if args.command == "rotate-session-secret":
+        _rotate_session_secret(assume_yes=getattr(args, "yes", False))
         return
 
     if args.gen_cert:
@@ -1076,6 +1090,48 @@ def _reset_password():
         await _db.close()
 
     asyncio.run(_do_reset())
+
+
+def _rotate_session_secret(assume_yes: bool = False):
+    """CLI: rotate the session-signing secret (SEC-02/F2).
+
+    Deliberately CLI-only: this is an incident-response step from the security
+    advisory, normally run with the app STOPPED, not a routine setting. Exposing it
+    in the UI would also mean showing the notice to any session still holding a
+    forged cookie.
+    """
+    async def _do_rotate():
+        cfg = load_config()
+        _db = Database(cfg.data.db_path)
+        await _db.connect()
+        am = AuthManager(_db)
+        await am.initialize()
+        old = await _db.get_config("session_secret")
+        new = await am.rotate_session_secret()
+        await _db.close()
+        return old, new
+
+    if not assume_yes:
+        print("This logs out every active session, including your own.")
+        answer = input("Rotate the session secret? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted. Nothing was changed.")
+            raise SystemExit(1)
+
+    old, new = asyncio.run(_do_rotate())
+    if old == new:  # pragma: no cover - defensive; token_hex collision is impossible
+        print("Error: the secret did not change.")
+        raise SystemExit(1)
+
+    print("Session secret rotated.")
+    print()
+    print("*** RESTART IPMIDECK NOW, OR THE ROTATION HAS NO EFFECT. ***")
+    print("The running process keeps the previous secret in memory, so existing")
+    print("sessions — including any an attacker holds — stay valid until restart.")
+    print()
+    print("Reminder (security advisory): rotating this secret is only one step.")
+    print("Also rotate the credential key and re-enter your BMC credentials if the")
+    print("database may have been copied.")
 
 
 if __name__ == "__main__":

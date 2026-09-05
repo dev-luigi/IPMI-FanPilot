@@ -290,6 +290,29 @@ class AuthManager:
             await self.db.set_config("session_secret", secret)
         self._secret = secret
 
+    async def rotate_session_secret(self) -> str:
+        """Replace the session-signing secret, invalidating every issued token.
+
+        SEC-02/F2: session tokens are stateless HMACs signed with
+        ``app_config['session_secret']``, and that row lives in the same database
+        SEC-01 allowed an unauthenticated caller to read. Anyone holding a copy can
+        keep minting valid cookies **after** the traversal is patched — patching
+        does not evict them. This is the supported eviction step the advisory
+        mandates, and it is the reason the operator must also rotate the credential
+        key and re-enter BMC credentials.
+
+        The new value is written immediately, but the running process keeps the old
+        secret in memory (``self._secret``), so **live sessions survive until the
+        app is restarted**. Callers MUST tell the operator to restart; the CLI
+        wrapper prints that warning in the loudest form it has.
+
+        Returns the new secret so a caller can assert it changed. It is never
+        logged, printed, or returned over the API.
+        """
+        new_secret = secrets.token_hex(32)
+        await self.db.set_config("session_secret", new_secret)
+        return new_secret
+
     async def is_auth_enabled(self) -> bool:
         val = await self.db.get_config("auth_enabled", "true")
         return val.lower() in ("true", "1", "yes")
