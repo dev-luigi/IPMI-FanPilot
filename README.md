@@ -192,6 +192,26 @@ credential key and re-enter your BMC credentials.
 
 ---
 
+## Backups
+
+Settings → System can download a backup archive, and restore one on the next start.
+
+> **A backup archive contains your secrets.** It bundles `ipmideck.db`, `config.yaml` and
+> `encryption.key` — the database holds your encrypted BMC credentials and the session-signing
+> secret, and the key file is what decrypts them. Anyone holding an archive can recover **plaintext
+> BMC root credentials for every managed server** and forge session cookies.
+>
+> The key has to be included, otherwise a restore could not decrypt anything. So treat the archive
+> exactly like the credentials themselves:
+>
+> - store it encrypted (an encrypted volume, or `age`/`gpg` on the file), never in a plain sync folder
+> - never attach it to a bug report, issue, or support thread
+> - delete copies you no longer need, including from your Downloads folder
+> - after restoring onto a new host, consider rotating the BMC passwords if the archive ever left
+>   your control
+
+---
+
 ## Screenshots
 
 ### FanPilot — visual fan curve editor

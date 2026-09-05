@@ -21,6 +21,9 @@ export function SecuritySection({ headingRef }: SecuritySectionProps) {
   const { t } = useTranslation();
   const { online, offlineTip } = useSettings();
   const authEnabled = useAuthStore((s) => s.authEnabled);
+  // SEC-05: whether an account already exists decides if /configure needs the
+  // current password (re-enabling on an existing instance vs first-run setup).
+  const hasUser = useAuthStore((s) => s.hasUser);
 
   const [secUsername, setSecUsername] = useState("");
   const [secPassword, setSecPassword] = useState("");
@@ -38,13 +41,30 @@ export function SecuritySection({ headingRef }: SecuritySectionProps) {
       toast.error(t("settings.passwordsDoNotMatch"));
       return;
     }
+    // SEC-05: re-enabling on an instance that already has an account requires the
+    // CURRENT password — a cookie (or, on a disabled instance, no cookie at all)
+    // must not be enough to rewrite the sole account.
+    if (hasUser && !secCurrentPassword.trim()) {
+      toast.error(t("settings.currentPasswordRequired"));
+      return;
+    }
     setSecBusy(true);
     try {
-      await post("/api/auth/configure", { username: secUsername, password: secPassword });
+      const res = await post<{ success: boolean; error?: string }>(
+        "/api/auth/configure",
+        hasUser
+          ? { username: secUsername, password: secPassword, current_password: secCurrentPassword }
+          : { username: secUsername, password: secPassword }
+      );
+      if (res && res.success === false) {
+        toast.error(res.error || t("settings.authEnableFailed"));
+        return;
+      }
       useAuthStore.setState({ authEnabled: true, authenticated: true, hasUser: true, username: secUsername });
       setSecUsername("");
       setSecPassword("");
       setSecPasswordConfirm("");
+      setSecCurrentPassword("");
       toast.success(t("settings.authEnabledToast"));
     } catch {
       toast.error(t("settings.authEnableFailed"));
@@ -153,7 +173,25 @@ export function SecuritySection({ headingRef }: SecuritySectionProps) {
             {secPassword && secPasswordConfirm && secPassword !== secPasswordConfirm && (
               <p className="text-xs text-danger">{t("settings.passwordsDoNotMatch")}</p>
             )}
-            <button onClick={enableAuth} disabled={secBusy || !online} title={offlineTip} className={primaryBtnClass}>
+            {/* SEC-05: an instance that already has an account must prove the CURRENT
+                password before its credentials can be replaced. Not shown on first-run
+                (no account yet), so the setup flow is unchanged. */}
+            {hasUser && (
+              <input
+                type="password"
+                placeholder={t("settings.currentPasswordPlaceholder")}
+                value={secCurrentPassword}
+                onChange={(e) => setSecCurrentPassword(e.target.value)}
+                autoComplete="current-password"
+                className={cn(inputClass, "font-mono")}
+              />
+            )}
+            <button
+              onClick={enableAuth}
+              disabled={secBusy || !online || (hasUser && !secCurrentPassword.trim())}
+              title={offlineTip}
+              className={primaryBtnClass}
+            >
               {t("settings.enableAuth")}
             </button>
           </div>

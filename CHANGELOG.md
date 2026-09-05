@@ -10,7 +10,14 @@ into a new dated `## [<version>] - YYYY-MM-DD` section.
 
 ## [Unreleased]
 
+> **Upgrading:** this release invalidates every existing session. You will be asked to log in
+> again once after updating — that is intentional (see "sessions are now bound to your
+> credentials" below).
+
 ### Security
+
+This release closes the CRITICAL and HIGH findings from an adversarial security audit of the
+authentication and static-file surfaces.
 
 - **Fixed a pre-authentication path traversal in the SPA fallback handler.** An unauthenticated
   request could read files outside the web root — including `data/encryption.key` and
@@ -25,9 +32,24 @@ into a new dated `## [<version>] - YYYY-MM-DD` section.
   invalidates every issued token. It asks for confirmation (`--yes` skips it for scripts) and
   prints a prominent restart warning: **the rotation only takes effect once IPMIDeck is restarted**,
   because the running process keeps the previous secret in memory.
+- **Sessions are now bound to your credentials.** Changing your password (or username) invalidates
+  every session issued before the change — previously only a username change did, so "reset my
+  password" did not actually lock anyone out. Tokens issued by earlier versions do not carry this
+  binding and are rejected, which is why everyone is signed out once on upgrade.
+- **An anonymous caller can no longer disable authentication on a fresh instance.** Before an
+  account existed, `POST /api/auth/toggle {"enabled": false}` was accepted with no cookie and no
+  password; completing first-run setup then created the user *without* turning authentication back
+  on, leaving the whole API open on the LAN with no visible symptom. The pre-setup disable is now
+  refused, and completing setup always leaves authentication enabled.
+- **Changing credentials now requires the current password.** A valid session cookie alone was
+  enough to rewrite the sole account through `/api/auth/configure` — including a cookie the
+  operator had just tried to evict — and on an auth-disabled instance no cookie was needed at all.
+- **`GET /api/system/app-config/{key}` now honours an allow-list.** It previously returned any
+  `app_config` row to any authenticated caller, including `session_secret`. The read surface is now
+  exactly the write surface.
 
-  If your database may have been exposed, rotating the session secret is only one of three steps —
-  also rotate the credential key and re-enter your BMC credentials.
+If your database may have been exposed, updating is not enough on its own: also rotate the session
+secret **and** the credential key, then re-enter your BMC credentials.
 
 ### Fixed
 
@@ -35,6 +57,14 @@ into a new dated `## [<version>] - YYYY-MM-DD` section.
   underlying update matched zero rows and the command still printed "Password updated", leaving
   the operator locked out believing the password had been changed. It now names the configured
   username and exits non-zero.
+
+### Security notes
+
+- **Backup archives contain secrets.** `POST /api/system/backup` bundles `ipmideck.db`,
+  `config.yaml` and `encryption.key` — together enough to decrypt every stored BMC credential and
+  to forge session cookies. Treat a backup archive exactly like the credentials themselves: store
+  it encrypted, do not attach it to issues or support threads, and delete copies you no longer
+  need. This is documented in the README's Backups section.
 
 ## [2.0.1] - 2026-07-25
 

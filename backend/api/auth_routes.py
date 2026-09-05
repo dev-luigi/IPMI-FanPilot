@@ -47,6 +47,12 @@ class SetupRequest(BaseModel):
 class ConfigureRequest(BaseModel):
     username: str
     password: str
+    # SEC-05/F6: required when an ACTIVE login already exists (auth_enabled AND
+    # has_user). A valid cookie alone must not be enough to rewrite the sole
+    # account — that is the exact move an attacker makes with a stolen or forged
+    # session. Unused during first-run / re-enable-from-disabled, where there is
+    # no current password to prove.
+    current_password: str | None = None
 
 
 class ToggleRequest(BaseModel):
@@ -65,10 +71,27 @@ async def _require_session_if_active(request: Request, auth) -> None:
     first-run / re-enable-from-disabled path. Once `auth_enabled AND has_user`, a valid
     session cookie is mandatory (else 401). Shared by /configure and /toggle so both
     endpoints enforce ONE consistent first-run-aware rule.
+
+    SEC-05/F6: the signature check alone is not enough. A cookie signed for a user
+    that no longer exists — or for a different account after a credential replace —
+    still verified here, so the operator's own eviction move (rotating the account
+    via /configure) left the attacker able to call /configure and re-take the
+    instance. The token subject must also BE the current account, which is the
+    same rule `require_auth` applies to every other route.
     """
     if await auth.is_auth_enabled() and await auth.has_user():
         token = request.cookies.get("session")
-        if not token or not auth.verify_session_token(token):
+        username = auth.verify_session_token(token) if token else None
+        if not username:
+            raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+        row = await auth.db.fetchone(
+            "SELECT 1 FROM users WHERE username = ?", (username,)
+        )
+        if row is None:
+            raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+        # SEC-03/F7: same fail-closed credential-fingerprint rule require_auth applies.
+        expected_cfp = await auth.credential_fingerprint(username)
+        if expected_cfp is None or not auth.token_matches_fingerprint(token, expected_cfp):
             raise HTTPException(status_code=401, detail={"error": "unauthorized"})
 
 
@@ -125,7 +148,7 @@ async def login(body: LoginRequest, request: Request, response: Response, lang: 
 
     # 3. Success: clear any prior failure counter, issue session.
     await auth.reset_failures(body.username)
-    token = auth.create_session_token(body.username)
+    token = await auth.create_session_token_for(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
@@ -138,11 +161,22 @@ async def logout(response: Response):
 
 @router.post("/setup")
 async def setup(body: SetupRequest, request: Request, response: Response, lang: str = Depends(get_lang)):
+    """First-run account creation.
+
+    SEC-04/F5: this MUST re-enable authentication. An anonymous caller could
+    previously reach a fresh instance, POST /auth/toggle {enabled:false} (allowed
+    because `has_user()` was still false), and then wait: the owner completing
+    setup created the user but never flipped `auth_enabled` back on, leaving the
+    whole API open to the LAN permanently with no visible symptom. Only
+    /configure enabled auth, and the SPA's setup page does not call it.
+    """
     from backend.main import auth
     if await auth.has_user():
         return {"success": False, "error": t("user_already_exists", lang)}
     await auth.create_user(body.username, body.password)
-    token = auth.create_session_token(body.username)
+    # SEC-04/F5: completing setup always leaves auth ON, whatever the flag was.
+    await auth.set_auth_enabled(True)
+    token = await auth.create_session_token_for(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
@@ -159,12 +193,36 @@ async def configure_auth(body: ConfigureRequest, request: Request, response: Res
     """
     from backend.main import auth
     await _require_session_if_active(request, auth)
+
+    # SEC-05/F6 (+ F10): when an account already exists, prove knowledge of the
+    # CURRENT password before replacing it. Keyed on has_user() alone, NOT on
+    # auth_enabled: an auth-disabled instance with a user is exactly the F10
+    # takeover window, where an anonymous caller could overwrite the account and
+    # flip auth back on. First-run (no user yet) has no password to prove.
+    if await auth.has_user():
+        if not body.current_password:
+            return {
+                "success": False,
+                "error": "Current password is required to change credentials",
+            }
+        token = request.cookies.get("session")
+        current_user = auth.verify_session_token(token) if token else None
+        if current_user is None:
+            # Auth-disabled instances carry no session; fall back to the single
+            # stored account, which is who the password must belong to.
+            row = await auth.db.fetchone("SELECT username FROM users LIMIT 1")
+            current_user = row["username"] if row else None
+        if not current_user or not await auth.verify_password(
+            current_user, body.current_password
+        ):
+            return {"success": False, "error": "Incorrect password"}
+
     try:
         await auth.replace_user(body.username, body.password)
     except ValueError as e:
         return {"success": False, "error": str(e)}
     await auth.set_auth_enabled(True)
-    token = auth.create_session_token(body.username)
+    token = await auth.create_session_token_for(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
@@ -200,6 +258,19 @@ async def toggle_auth(body: ToggleRequest, request: Request, lang: str = Depends
             "success": False,
             "error": t("use_configure_to_enable", lang),
         }
+
+    # SEC-04/F5: refuse the anonymous pre-setup disable. With no user yet the
+    # session helper below is a no-op, so an unauthenticated LAN caller could
+    # turn auth off on a fresh instance and leave it off forever (setup used to
+    # create the user without re-enabling). There is no legitimate reason to
+    # disable auth before an account exists: the setup wizard's "skip auth" path
+    # goes through /configure, which sets credentials.
+    if not await auth.has_user():
+        return {
+            "success": False,
+            "error": "Authentication cannot be disabled before an account exists",
+        }
+
     await _require_session_if_active(request, auth)
 
     if await auth.has_user():

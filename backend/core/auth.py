@@ -434,12 +434,46 @@ class AuthManager:
         async with self._fail_lock:
             self._fail_state.pop(username, None)
 
-    def create_session_token(self, username: str) -> str:
+    async def credential_fingerprint(self, username: str) -> str | None:
+        """Short digest binding a token to the credentials it was issued against.
+
+        SEC-03/F7: tokens are stateless, so changing the password revoked nothing —
+        an attacker holding a stolen or forged cookie kept full access even after
+        the operator "reset" their password. Only a *username* change evicted them
+        (via the `require_auth` current-user check), which is not the move most
+        operators reach for.
+
+        The digest covers username AND the bcrypt hash, so either a password change
+        or a username change invalidates every token issued before it. The hash is
+        never exposed: only this HMAC of it travels in the cookie, keyed with the
+        session secret so it cannot be recomputed offline from a leaked hash alone.
+
+        Returns None when the user does not exist.
+        """
+        row = await self.db.fetchone(
+            "SELECT password_hash FROM users WHERE username = ?", (username,)
+        )
+        if not row:
+            return None
+        material = f"{username}:{row['password_hash']}".encode()
+        return hmac.new(self._secret.encode(), material, hashlib.sha256).hexdigest()[:32]
+
+    async def create_session_token_for(self, username: str) -> str:
+        """Issue a session token bound to the current credentials (SEC-03).
+
+        Preferred over `create_session_token`, which cannot embed the fingerprint
+        because it is synchronous and the digest needs a database read.
+        """
+        return self.create_session_token(username, cfp=await self.credential_fingerprint(username))
+
+    def create_session_token(self, username: str, cfp: str | None = None) -> str:
         payload = {
             "sub": username,
             "iat": int(time.time()),
             "exp": int(time.time()) + self.session_expiry_seconds,
         }
+        if cfp is not None:
+            payload["cfp"] = cfp
         data = json.dumps(payload, separators=(",", ":"))
         sig = hmac.new(self._secret.encode(), data.encode(), hashlib.sha256).hexdigest()
         # base64url-encode the data part so the cookie value is RFC 6265-safe
@@ -467,6 +501,26 @@ class AuthManager:
             return payload.get("sub")
         except Exception:
             return None
+
+    def token_matches_fingerprint(self, token: str, expected_cfp: str) -> bool:
+        """Fail-closed check that a token carries the expected credential fingerprint.
+
+        SEC-03/F7. Returns False when the claim is absent (pre-upgrade or forged
+        tokens), unreadable, or different. The signature is NOT re-verified here —
+        callers reach this only after `verify_session_token` succeeded — but the
+        comparison is constant-time anyway.
+        """
+        try:
+            b64_part, _sig = token.rsplit(".", 1)
+            data_part = base64.urlsafe_b64decode(
+                b64_part + "=" * (-len(b64_part) % 4)
+            ).decode()
+            cfp = json.loads(data_part).get("cfp")
+        except Exception:
+            return False
+        if not isinstance(cfp, str):
+            return False
+        return hmac.compare_digest(cfp, expected_cfp)
 
     def get_encryption_key(self) -> bytes:
         """Return the at-rest BMC-credential encryption key.
@@ -513,4 +567,15 @@ async def require_auth(request: Request) -> str:
     )
     if row is None:
         raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+
+    # SEC-03/F7: the token must also match the CURRENT credentials, so a password
+    # change revokes every session issued before it. Fail-closed on a missing claim:
+    # tokens minted before this release carry no `cfp`, and a forged one would simply
+    # omit it, so "absent" must mean "rejected" — never "grandfathered in". The
+    # one-time cost is that everyone is logged out once on upgrade, which is the
+    # intended outcome for a release whose whole point is evicting stale sessions.
+    expected_cfp = await _auth.credential_fingerprint(username)
+    if expected_cfp is None or not _auth.token_matches_fingerprint(token, expected_cfp):
+        raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+
     return username
