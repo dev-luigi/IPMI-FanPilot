@@ -10,6 +10,32 @@ into a new dated `## [<version>] - YYYY-MM-DD` section.
 
 ## [Unreleased]
 
+### Security
+
+- **Fixed a pre-authentication path traversal in the SPA fallback handler.** An unauthenticated
+  request could read files outside the web root — including `data/encryption.key` and
+  `data/ipmideck.db`, which together yield plaintext BMC credentials for every managed server.
+  The handler now decides containment on the canonical path, so every escape spelling
+  (`../`, `%2e%2e%2f`, `..%2f`, `..%5c`, absolute and Windows-style paths, symlinks) falls back to
+  the SPA shell. NUL bytes and oversized paths are rejected instead of raising a 500, and the
+  `/api/*` 404 guard for disabled modules is unchanged.
+- **Added `ipmideck rotate-session-secret`.** Session tokens are stateless HMACs signed with a
+  secret stored in the database, so anyone who obtained a copy of the database via the traversal
+  above can keep minting valid sessions *after* updating. This command rotates that secret and
+  invalidates every issued token. It asks for confirmation (`--yes` skips it for scripts) and
+  prints a prominent restart warning: **the rotation only takes effect once IPMIDeck is restarted**,
+  because the running process keeps the previous secret in memory.
+
+  If your database may have been exposed, rotating the session secret is only one of three steps —
+  also rotate the credential key and re-enter your BMC credentials.
+
+### Fixed
+
+- `ipmideck reset-password` no longer reports success when the username does not exist. The
+  underlying update matched zero rows and the command still printed "Password updated", leaving
+  the operator locked out believing the password had been changed. It now names the configured
+  username and exits non-zero.
+
 ## [2.0.1] - 2026-07-25
 
 ### Fixed

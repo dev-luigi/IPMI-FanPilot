@@ -162,6 +162,36 @@ See the [Interactive Console docs](https://docs.ipmideck.com/en/console) for ful
 
 ---
 
+## CLI
+
+```bash
+ipmideck start                    # start the server (default; `ipmideck` alone works too)
+ipmideck reset-password           # set the admin username and password
+ipmideck rotate-session-secret    # invalidate every session token
+ipmideck --gen-cert               # generate a self-signed TLS certificate pair
+```
+
+**`rotate-session-secret`** replaces the secret used to sign session tokens, so every issued
+session stops working. Use it if your database may have been copied — session tokens are
+stateless, so an attacker holding a copy can keep minting valid sessions until the secret changes.
+
+```
+$ ipmideck rotate-session-secret
+This logs out every active session, including your own.
+Rotate the session secret? [y/N]: y
+Session secret rotated.
+
+*** RESTART IPMIDECK NOW, OR THE ROTATION HAS NO EFFECT. ***
+```
+
+The running process keeps the previous secret in memory, so **the rotation only applies after a
+restart**. Pass `--yes` (or `-y`) to skip the prompt in scripts.
+
+If the database may have been exposed, rotating this secret is one of three steps: also rotate the
+credential key and re-enter your BMC credentials.
+
+---
+
 ## Screenshots
 
 ### FanPilot — visual fan curve editor
