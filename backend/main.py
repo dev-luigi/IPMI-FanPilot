@@ -1082,7 +1082,12 @@ def _reset_password():
         username = input("Username: ")
         password = getpass.getpass("New password: ")
         if await am.has_user():
-            await am.update_password(username, password)
+            try:
+                await am.update_password(username, password)
+            except ValueError as exc:
+                print(f"Error: {exc}")
+                await _db.close()
+                raise SystemExit(1) from None
             print(f"Password updated for {username}")
         else:
             await am.create_user(username, password)

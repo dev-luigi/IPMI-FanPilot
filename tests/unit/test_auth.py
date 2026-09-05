@@ -264,3 +264,37 @@ async def test_get_encryption_key_before_init_raises(tmp_path):
     with pytest.raises(RuntimeError):
         am.get_encryption_key()
     await db.close()
+
+
+# === reset-password: no-op silenzioso su username inesistente (quick 260905-jvu) ===
+
+
+async def test_update_password_unknown_user_raises(auth_manager):
+    """update_password su uno username inesistente non deve riuscire in silenzio.
+
+    La tabella users e' single-user. Se l'operatore digita uno username sbagliato
+    durante `ipmideck reset-password`, l'UPDATE non tocca alcuna riga: prima della
+    correzione il comando stampava comunque "Password updated", lasciando l'utente
+    convinto di aver reimpostato la password.
+    """
+    am, _db = auth_manager
+    await am.create_user("alice", "vecchia-password")
+
+    import pytest
+
+    with pytest.raises(ValueError, match="alice"):
+        await am.update_password("alcie", "nuova-password")
+
+    # La password di alice deve essere rimasta intatta.
+    assert await am.verify_password("alice", "vecchia-password") is True
+
+
+async def test_update_password_known_user_still_works(auth_manager):
+    """Non-regressione: il percorso di successo resta invariato."""
+    am, _db = auth_manager
+    await am.create_user("alice", "vecchia-password")
+
+    await am.update_password("alice", "nuova-password")
+
+    assert await am.verify_password("alice", "nuova-password") is True
+    assert await am.verify_password("alice", "vecchia-password") is False

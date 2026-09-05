@@ -342,11 +342,23 @@ class AuthManager:
         return bcrypt.checkpw(password.encode(), row["password_hash"].encode())
 
     async def update_password(self, username: str, new_password: str) -> None:
+        """Update the password for an existing user.
+
+        The users table is single-user, so a mistyped username during
+        `ipmideck reset-password` matches no row. Without this check the UPDATE
+        would succeed silently and the CLI would report success while nothing
+        changed, locking the operator out of their own instance.
+        """
         pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
-        await self.db.execute(
+        cursor = await self.db.execute(
             "UPDATE users SET password_hash = ? WHERE username = ?",
             (pw_hash, username),
         )
+        if cursor.rowcount == 0:
+            row = await self.db.fetchone("SELECT username FROM users LIMIT 1")
+            existing = row["username"] if row else None
+            hint = f" The configured user is '{existing}'." if existing else ""
+            raise ValueError(f"No user named '{username}'.{hint}")
         await self.db.commit()
 
     async def replace_user(self, username: str, password: str) -> None:
