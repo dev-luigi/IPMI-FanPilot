@@ -59,12 +59,8 @@ def _raw_request(port: int, raw_target: str, headers: str = "") -> tuple[int, by
     return status, body
 
 
-@pytest.fixture(scope="module")
-def live_server(tmp_path_factory: pytest.TempPathFactory):
-    """Boot a real uvicorn subprocess on an ephemeral port; always tear it down."""
-    data_dir = tmp_path_factory.mktemp("live-server-data")
-    port = _free_port()
-    env = {
+def _server_env(data_dir: Path) -> dict[str, str]:
+    return {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "HOME": str(data_dir),
         "IPMIDECK_DEMO": "true",
@@ -75,7 +71,10 @@ def live_server(tmp_path_factory: pytest.TempPathFactory):
         "NO_COLOR": "1",
         "TERM": "dumb",
     }
-    proc = subprocess.Popen(
+
+
+def _spawn_server(data_dir: Path, port: int) -> subprocess.Popen:
+    return subprocess.Popen(
         [
             sys.executable,
             "-m",
@@ -89,37 +88,51 @@ def live_server(tmp_path_factory: pytest.TempPathFactory):
             "warning",
         ],
         cwd=str(REPO_ROOT),
-        env=env,
+        env=_server_env(data_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
+
+
+def _await_ready(proc: subprocess.Popen, port: int) -> None:
+    """Bounded readiness poll against /api/health."""
+    deadline = time.monotonic() + BOOT_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            out = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
+            pytest.fail(f"server exited during boot (rc={proc.returncode}):\n{out}")
+        try:
+            status, _ = _raw_request(port, "/api/health")
+            if status == 200:
+                return
+        except OSError:
+            pass
+        time.sleep(0.25)
+    pytest.fail(f"server did not answer /api/health within {BOOT_TIMEOUT_S}s")
+
+
+def _stop_server(proc: subprocess.Popen) -> None:
+    proc.terminate()
     try:
-        deadline = time.monotonic() + BOOT_TIMEOUT_S
-        ready = False
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                out = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
-                pytest.fail(f"server exited during boot (rc={proc.returncode}):\n{out}")
-            try:
-                status, _ = _raw_request(port, "/api/health")
-                if status == 200:
-                    ready = True
-                    break
-            except OSError:
-                pass
-            time.sleep(0.25)
-        if not ready:
-            pytest.fail(f"server did not answer /api/health within {BOOT_TIMEOUT_S}s")
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+        proc.kill()
+        proc.wait(timeout=15)
+    if proc.stdout:
+        proc.stdout.close()
+
+
+@pytest.fixture(scope="module")
+def live_server(tmp_path_factory: pytest.TempPathFactory):
+    """Boot a real uvicorn subprocess on an ephemeral port; always tear it down."""
+    data_dir = tmp_path_factory.mktemp("live-server-data")
+    port = _free_port()
+    proc = _spawn_server(data_dir, port)
+    try:
+        _await_ready(proc, port)
         yield port
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
-            proc.kill()
-            proc.wait(timeout=10)
-        if proc.stdout:
-            proc.stdout.close()
+        _stop_server(proc)
 
 
 @pytest.fixture(scope="module")
@@ -210,7 +223,7 @@ def test_client_side_route_serves_the_spa(live_server: int, index_html_size: int
 SECRET_KEYS = ["session_secret", "app_secret", "auth_enabled", "encryption_key"]
 
 
-def _post_json(port: int, path: str, payload: dict) -> tuple[int, bytes, list[str]]:
+def _post_json(port: int, path: str, payload: dict, headers: str = "") -> tuple[int, bytes, list[str]]:
     """Minimal raw POST returning (status, body, set-cookie headers)."""
     encoded = json.dumps(payload).encode()
     with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
@@ -219,6 +232,7 @@ def _post_json(port: int, path: str, payload: dict) -> tuple[int, bytes, list[st
             f"Host: 127.0.0.1:{port}\r\n"
             "Content-Type: application/json\r\n"
             f"Content-Length: {len(encoded)}\r\n"
+            f"{headers}"
             "Connection: close\r\n\r\n"
         ).encode() + encoded
         sock.sendall(request)
@@ -302,3 +316,199 @@ def test_allow_listed_keys_still_resolve(
     assert parsed.get("success") is True, f"{key} was refused: {parsed}"
     assert parsed.get("key") == key
     assert "value" in parsed
+
+
+# --- SEC-02 / F2 — stop-rotate-restart evicts every cookie -----------------
+
+
+def _rotate_secret_via_cli(data_dir: Path) -> None:
+    """Run the operator's actual eviction move against the same on-disk DB."""
+    result = subprocess.run(
+        [sys.executable, "-m", "backend.main", "rotate-session-secret"],
+        cwd=str(REPO_ROOT),
+        env=_server_env(data_dir),
+        capture_output=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"rotate-session-secret exited {result.returncode}: "
+        f"{result.stdout.decode(errors='replace')}{result.stderr.decode(errors='replace')}"
+    )
+    assert b"rotated" in result.stdout.lower()
+
+
+def test_stop_rotate_restart_refuses_the_retained_cookie(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """ROADMAP criterion 3: a token minted from a copied DB dies on rotation.
+
+    Replayed as the operator actually performs it, because the running process
+    holds the secret in memory:
+
+        1. stop IPMIDeck
+        2. ipmideck rotate-session-secret
+        3. start IPMIDeck
+
+    This is the exact sequence 10-03 documents in README's Security section.
+    """
+    data_dir = tmp_path_factory.mktemp("rotate-chain")
+    port = _free_port()
+
+    # --- boot, create an account, keep the cookie
+    proc = _spawn_server(data_dir, port)
+    try:
+        _await_ready(proc, port)
+        status, _, cookies = _post_json(
+            port,
+            "/api/auth/setup",
+            {"username": "rotateop", "password": "correct-horse-battery-staple"},
+        )
+        assert status == 200 and cookies
+        cookie = cookies[0].split(";")[0]
+
+        # The cookie works before rotation.
+        status, body = _raw_request(port, "/api/servers", headers=f"Cookie: {cookie}\r\n")
+        assert status == 200, f"baseline: authenticated request failed with {status}"
+        status, body = _raw_request(port, "/api/auth/me", headers=f"Cookie: {cookie}\r\n")
+        assert json.loads(body).get("authenticated") is True
+    finally:
+        # --- step 1: stop
+        _stop_server(proc)
+
+    # --- step 2: rotate against the same on-disk DB
+    _rotate_secret_via_cli(data_dir)
+
+    # --- step 3: restart on the same data dir
+    port2 = _free_port()
+    proc2 = _spawn_server(data_dir, port2)
+    try:
+        _await_ready(proc2, port2)
+
+        status, _ = _raw_request(port2, "/api/servers", headers=f"Cookie: {cookie}\r\n")
+        assert status == 401, (
+            f"the pre-rotation cookie still authenticated after the rotation (HTTP {status})"
+        )
+
+        status, body = _raw_request(port2, "/api/auth/me", headers=f"Cookie: {cookie}\r\n")
+        assert status == 200
+        assert json.loads(body).get("authenticated") is False
+
+        # And the operator can log straight back in with the same password.
+        status, _, cookies = _post_json(
+            port2,
+            "/api/auth/login",
+            {"username": "rotateop", "password": "correct-horse-battery-staple"},
+        )
+        assert status == 200 and cookies
+        fresh = cookies[0].split(";")[0]
+        status, _ = _raw_request(port2, "/api/servers", headers=f"Cookie: {fresh}\r\n")
+        assert status == 200, "a freshly issued cookie must work after rotation"
+    finally:
+        _stop_server(proc2)
+
+
+# --- SEC-03 / F7 — a password change evicts every session -----------------
+
+
+def test_password_change_evicts_the_retained_cookie(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """ROADMAP criterion 4, over real HTTP: the advertised eviction move evicts.
+
+    Chain D's counter-proof. `/configure` changes the account password; the
+    cookie held from before the change must be refused on a protected route AND
+    on `/api/auth/me`, and the newly issued cookie must work.
+    """
+    data_dir = tmp_path_factory.mktemp("pwchange-chain")
+    port = _free_port()
+    proc = _spawn_server(data_dir, port)
+    try:
+        _await_ready(proc, port)
+        status, _, cookies = _post_json(
+            port,
+            "/api/auth/setup",
+            {"username": "changeop", "password": "original-password-value"},
+        )
+        assert status == 200 and cookies
+        old_cookie = cookies[0].split(";")[0]
+
+        status, _ = _raw_request(port, "/api/servers", headers=f"Cookie: {old_cookie}\r\n")
+        assert status == 200, "baseline: the cookie must work before the change"
+
+        # Change the password through the real endpoint, carrying the session.
+        status, _, new_cookies = _post_json(
+            port,
+            "/api/auth/configure",
+            {"username": "changeop", "password": "a-brand-new-password"},
+            headers=f"Cookie: {old_cookie}\r\n",
+        )
+        assert status == 200
+
+        # The OLD cookie is dead everywhere.
+        status, _ = _raw_request(port, "/api/servers", headers=f"Cookie: {old_cookie}\r\n")
+        assert status == 401, f"pre-change cookie still accepted on a protected route ({status})"
+
+        status, body = _raw_request(port, "/api/auth/me", headers=f"Cookie: {old_cookie}\r\n")
+        assert status == 200
+        assert json.loads(body).get("authenticated") is False, "/api/auth/me still accepts it"
+
+        # The cookie issued by /configure works.
+        assert new_cookies, "/configure must issue a fresh cookie"
+        fresh = new_cookies[0].split(";")[0]
+        status, _ = _raw_request(port, "/api/servers", headers=f"Cookie: {fresh}\r\n")
+        assert status == 200, "the freshly issued cookie must authenticate"
+    finally:
+        _stop_server(proc)
+
+
+def test_claimless_forged_cookie_is_refused_over_http(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """D1 fail-closed at the route layer: a perfectly-signed claim-less token.
+
+    Built the way an attacker with the stolen signing secret would: read the
+    secret out of the DB, mint a token with a valid signature and no `cfp`
+    claim — indistinguishable from a pre-upgrade cookie. It must be refused.
+    """
+    import base64
+    import hashlib
+    import hmac
+    import sqlite3
+    import time as _time
+
+    data_dir = tmp_path_factory.mktemp("forge-chain")
+    port = _free_port()
+    proc = _spawn_server(data_dir, port)
+    try:
+        _await_ready(proc, port)
+        status, _, cookies = _post_json(
+            port,
+            "/api/auth/setup",
+            {"username": "forgeop", "password": "correct-horse-battery-staple"},
+        )
+        assert status == 200 and cookies
+
+        # Attacker reads the signing secret from the (copied) database.
+        conn = sqlite3.connect(str(data_dir / "test.db"))
+        secret = conn.execute(
+            "SELECT value FROM app_config WHERE key='session_secret'"
+        ).fetchone()[0]
+        conn.close()
+        assert secret
+
+        payload = json.dumps(
+            {"sub": "forgeop", "iat": int(_time.time()), "exp": int(_time.time()) + 86400},
+            separators=(",", ":"),
+        )
+        sig = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+        forged = f"session={b64}.{sig}"
+
+        status, _ = _raw_request(port, "/api/servers", headers=f"Cookie: {forged}\r\n")
+        assert status == 401, f"a claim-less forged cookie was accepted (HTTP {status})"
+
+        status, body = _raw_request(port, "/api/auth/me", headers=f"Cookie: {forged}\r\n")
+        assert json.loads(body).get("authenticated") is False
+    finally:
+        _stop_server(proc)
+

@@ -68,7 +68,7 @@ async def _require_session_if_active(request: Request, auth) -> None:
     """
     if await auth.is_auth_enabled() and await auth.has_user():
         token = request.cookies.get("session")
-        if not token or not auth.verify_session_token(token):
+        if not token or not await auth.verify_session_token_async(token):
             raise HTTPException(status_code=401, detail={"error": "unauthorized"})
 
 
@@ -79,7 +79,7 @@ async def get_me(request: Request):
     if not await auth.is_auth_enabled():
         return {"authenticated": True, "username": "local", "auth_enabled": False, "has_user": has_user}
     token = request.cookies.get("session")
-    username = auth.verify_session_token(token) if token else None
+    username = await auth.verify_session_token_async(token) if token else None
     # REVIEWS #7: mirror require_auth — a token whose subject is no longer the current
     # stored user (e.g. after a credential replace) is NOT authenticated. Keeps /me
     # consistent with protected routes so the frontend boot routing sees the same state.
@@ -125,7 +125,7 @@ async def login(body: LoginRequest, request: Request, response: Response, lang: 
 
     # 3. Success: clear any prior failure counter, issue session.
     await auth.reset_failures(body.username)
-    token = auth.create_session_token(body.username)
+    token = await auth.create_session_token_async(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
@@ -142,7 +142,7 @@ async def setup(body: SetupRequest, request: Request, response: Response, lang: 
     if await auth.has_user():
         return {"success": False, "error": t("user_already_exists", lang)}
     await auth.create_user(body.username, body.password)
-    token = auth.create_session_token(body.username)
+    token = await auth.create_session_token_async(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
@@ -164,7 +164,7 @@ async def configure_auth(body: ConfigureRequest, request: Request, response: Res
     except ValueError as e:
         return {"success": False, "error": str(e)}
     await auth.set_auth_enabled(True)
-    token = auth.create_session_token(body.username)
+    token = await auth.create_session_token_async(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 

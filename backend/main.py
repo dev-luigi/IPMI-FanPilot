@@ -352,7 +352,7 @@ async def websocket_endpoint(
     # locked out. Uses the current module globals (auth, db, ws_manager) — there is
     # NO app-state container exists (Decision A1 — Codex HIGH fix).
     if await auth.is_auth_enabled():
-        username = auth.verify_session_token(session) if session else None
+        username = await auth.verify_session_token_async(session) if session else None
         if not username:
             # Reject pre-accept with policy-violation close code (1008).
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)

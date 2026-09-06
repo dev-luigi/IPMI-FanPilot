@@ -431,6 +431,25 @@ class AuthManager:
         async with self._fail_lock:
             self._fail_state.pop(username, None)
 
+    async def _credential_fingerprint(self, username: str) -> str | None:
+        """SEC-03 (F7): a short, stable digest of the user's stored password hash.
+
+        The bcrypt hash changes on every password change (per-hash salt), so a
+        fingerprint derived from it changes with the credentials and nothing extra
+        needs storing. Returns None when the username has no row — the caller then
+        has nothing to compare against and must refuse.
+
+        The claim is an equality check, not a secret: it travels inside a payload
+        that is already HMAC-signed, and a truncated digest of a bcrypt hash
+        reveals nothing usable without the hash itself.
+        """
+        row = await self.db.fetchone(
+            "SELECT password_hash FROM users WHERE username = ?", (username,)
+        )
+        if not row:
+            return None
+        return hashlib.sha256(row["password_hash"].encode()).hexdigest()[:16]
+
     def create_session_token(self, username: str) -> str:
         payload = {
             "sub": username,
@@ -445,8 +464,34 @@ class AuthManager:
         b64 = base64.urlsafe_b64encode(data.encode()).decode().rstrip("=")
         return f"{b64}.{sig}"
 
+    async def create_session_token_async(self, username: str) -> str:
+        """Mint a session token carrying the credential-fingerprint claim (SEC-03).
+
+        An async SIBLING of `create_session_token()` rather than a change to it:
+        the fingerprint needs a DB read, and the synchronous version is called
+        directly by existing tests. All three cookie issuers in `auth_routes.py`
+        are already async handlers, so awaiting here costs nothing.
+        """
+        payload = {
+            "sub": username,
+            "iat": int(time.time()),
+            "exp": int(time.time()) + self.session_expiry_seconds,
+        }
+        fingerprint = await self._credential_fingerprint(username)
+        if fingerprint is not None:
+            payload["cfp"] = fingerprint
+        data = json.dumps(payload, separators=(",", ":"))
+        sig = hmac.new(self._secret.encode(), data.encode(), hashlib.sha256).hexdigest()
+        b64 = base64.urlsafe_b64encode(data.encode()).decode().rstrip("=")
+        return f"{b64}.{sig}"
+
     def verify_session_token(self, token: str) -> str | None:
-        """Returns username if valid, None otherwise."""
+        """Returns username if valid, None otherwise.
+
+        Signature + expiry only. The credential-fingerprint claim is checked by
+        `verify_session_token_async()`, which needs a DB read; every request path
+        that authenticates a cookie MUST use that one (see D1 / fail-closed).
+        """
         try:
             b64_part, sig_part = token.rsplit(".", 1)
             # Re-pad and decode the base64url data part back to the raw JSON that was signed.
@@ -464,6 +509,50 @@ class AuthManager:
             return payload.get("sub")
         except Exception:
             return None
+
+    async def verify_session_token_async(self, token: str) -> str | None:
+        """Full session verification: signature, expiry, AND credential binding.
+
+        SEC-03 / D1 — **FAIL-CLOSED**. A token whose payload carries no `cfp`
+        claim is REJECTED. That is the whole point of the change: a forged token
+        (minted from a stolen signing secret) omits the claim in exactly the same
+        way a pre-upgrade token does, so treating "absent" as acceptable would
+        leave the forgery path open and make the fix cosmetic. The cost — every
+        operator is logged out once on upgrade — was accepted with eyes open and
+        is documented prominently in the CHANGELOG.
+
+        Returns the username only when the claim matches a fingerprint recomputed
+        from the CURRENT stored hash, so a password change evicts every token
+        minted before it without adding a session store.
+        """
+        try:
+            b64_part, sig_part = token.rsplit(".", 1)
+            data_part = base64.urlsafe_b64decode(
+                b64_part + "=" * (-len(b64_part) % 4)
+            ).decode()
+            expected_sig = hmac.new(
+                self._secret.encode(), data_part.encode(), hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(sig_part, expected_sig):
+                return None
+            payload = json.loads(data_part)
+            if payload.get("exp", 0) < time.time():
+                return None
+            username = payload.get("sub")
+            if not username:
+                return None
+        except Exception:
+            return None
+
+        claim = payload.get("cfp")
+        if not claim:
+            return None  # D1 fail-closed: absent claim == forged or pre-upgrade
+        current = await self._credential_fingerprint(username)
+        if current is None:
+            return None  # token subject is no longer the stored user
+        if not hmac.compare_digest(claim, current):
+            return None
+        return username
 
     def get_encryption_key(self) -> bytes:
         """Return the at-rest BMC-credential encryption key.
@@ -499,7 +588,7 @@ async def require_auth(request: Request) -> str:
     if not token:
         raise HTTPException(status_code=401, detail={"error": "unauthorized"})
 
-    username = _auth.verify_session_token(token)
+    username = await _auth.verify_session_token_async(token)
     if not username:
         raise HTTPException(status_code=401, detail={"error": "unauthorized"})
 
