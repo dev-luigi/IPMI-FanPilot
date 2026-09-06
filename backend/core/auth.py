@@ -290,6 +290,28 @@ class AuthManager:
             await self.db.set_config("session_secret", secret)
         self._secret = secret
 
+    async def rotate_session_secret(self) -> str:
+        """SEC-02 (F2): replace the session-signing secret; evict every cookie.
+
+        Sessions are stateless HMACs, so whoever reads `app_config.session_secret`
+        out of a copied database can mint valid cookies for the real username
+        forever — patching the read path (SEC-01/SEC-07) stops NEW disclosures but
+        cannot un-disclose a secret already taken. This is the eviction move.
+
+        Generates a fresh secret, persists it, and assigns it to `self._secret` so
+        a running process picks it up immediately. Returns the new secret so the
+        caller can confirm it changed (it is not printed to the operator).
+
+        Deliberately does NOT touch `self._file_key`: the at-rest credential key
+        has a different lifecycle (see the four-case migration in `initialize()`)
+        and re-keying stored BMC credentials is not part of this operation.
+        """
+        secret = secrets.token_hex(32)
+        await self.db.set_config("session_secret", secret)
+        self._secret = secret
+        logger.info("Session signing secret rotated — all existing sessions are now invalid")
+        return secret
+
     async def is_auth_enabled(self) -> bool:
         val = await self.db.get_config("auth_enabled", "true")
         return val.lower() in ("true", "1", "yes")

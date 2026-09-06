@@ -495,6 +495,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # `serve` kept as a deprecated alias of `start` so existing docs/scripts keep working.
     subparsers.add_parser("serve", help="Start the server (deprecated alias of `start`)")
     subparsers.add_parser("reset-password", help="Reset admin password")
+    subparsers.add_parser(
+        "rotate-session-secret",
+        help="Rotate the session signing secret — invalidates every existing "
+             "session cookie, including any minted from a stolen/copied database",
+    )
     return parser
 
 
@@ -635,6 +640,10 @@ def cli():
 
     if args.command == "reset-password":
         _reset_password()
+        return
+
+    if args.command == "rotate-session-secret":
+        _rotate_session_secret()
         return
 
     if args.gen_cert:
@@ -1074,6 +1083,31 @@ def _reset_password():
         await _db.close()
 
     asyncio.run(_do_reset())
+
+
+def _rotate_session_secret():
+    """SEC-02 (F2): rotate the session signing secret from the CLI.
+
+    Incident-response action, deliberately CLI-only: it is typically run with
+    the app stopped, and a UI control or banner would also be visible to whoever
+    holds a forged session.
+    """
+    async def _do_rotate():
+        cfg = load_config()
+        _db = Database(cfg.data.db_path)
+        await _db.connect()
+        am = AuthManager(_db)
+        await am.initialize()
+        await am.rotate_session_secret()
+        await _db.close()
+        print(
+            "Session signing secret rotated.\n"
+            "Every existing session cookie is now invalid — including any minted "
+            "offline from a copied database.\n"
+            "All operators must log in again. Restart IPMIDeck if it is running."
+        )
+
+    asyncio.run(_do_rotate())
 
 
 if __name__ == "__main__":
