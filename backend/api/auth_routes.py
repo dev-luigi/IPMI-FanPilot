@@ -138,10 +138,23 @@ async def logout(response: Response):
 
 @router.post("/setup")
 async def setup(body: SetupRequest, request: Request, response: Response, lang: str = Depends(get_lang)):
+    """First-run account creation. Always leaves authentication ENABLED.
+
+    SEC-04 clause 2 (F5): an anonymous caller can disable auth on a
+    not-yet-configured instance (that clause is deferred onto SEC-06 — see the
+    README Security advisory), and `setup` used to create the account without
+    touching the flag. The instance therefore stayed open forever, with no UI
+    symptom, even after the real operator finished first run.
+
+    Re-enabling unconditionally removes the DURABILITY and the SILENCE of that
+    attack: whatever the flag was beforehand, completing first run closes the
+    instance and the login page is enforced from then on.
+    """
     from backend.main import auth
     if await auth.has_user():
         return {"success": False, "error": t("user_already_exists", lang)}
     await auth.create_user(body.username, body.password)
+    await auth.set_auth_enabled(True)
     token = await auth.create_session_token_async(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
@@ -159,6 +172,7 @@ async def configure_auth(body: ConfigureRequest, request: Request, response: Res
     """
     from backend.main import auth
     await _require_session_if_active(request, auth)
+
     try:
         await auth.replace_user(body.username, body.password)
     except ValueError as e:
@@ -209,7 +223,7 @@ async def toggle_auth(body: ToggleRequest, request: Request, lang: str = Depends
                 "error": "Current password is required to disable authentication",
             }
         token = request.cookies.get("session")
-        username = auth.verify_session_token(token) if token else None
+        username = await auth.verify_session_token_async(token) if token else None
         if not username or not await auth.verify_password(username, body.current_password):
             return {"success": False, "error": "Incorrect password"}
 

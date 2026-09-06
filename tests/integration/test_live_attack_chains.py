@@ -512,3 +512,49 @@ def test_claimless_forged_cookie_is_refused_over_http(
     finally:
         _stop_server(proc)
 
+
+# --- SEC-04 clause 2 / SEC-05 — Chain B and Chain D, live -----------------
+
+
+def test_chain_b_end_state_is_closed_live(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Chain B replayed against a real server: anonymous toggle -> setup -> 401.
+
+    Verified live in this tree BEFORE the fix, this exact sequence ended in a
+    **200** with the full server inventory. It must now end in a 401.
+
+    The assertion is on the END STATE, not on the toggle. The anonymous
+    pre-setup disable is STILL EXPECTED TO SUCCEED — that is SEC-04 clause 1,
+    deferred onto SEC-06 per D4, and refusing it would break the
+    SAFETY-CRITICAL first-run skip in SetupPage.tsx:101.
+    """
+    data_dir = tmp_path_factory.mktemp("chain-b")
+    port = _free_port()
+    proc = _spawn_server(data_dir, port)
+    try:
+        _await_ready(proc, port)
+
+        # Step 1 — anonymous disable. Accepted by design (clause 1, deferred).
+        status, body, _ = _post_json(port, "/api/auth/toggle", {"enabled": False})
+        assert status == 200
+        assert json.loads(body).get("success") is True, (
+            "the first-run skip path must keep working — refusing it is a permanent lockout"
+        )
+
+        # Step 2 — the real operator completes first run.
+        status, _, cookies = _post_json(
+            port,
+            "/api/auth/setup",
+            {"username": "chainbop", "password": "correct-horse-battery-staple"},
+        )
+        assert status == 200 and cookies
+
+        # Step 3 — an ANONYMOUS caller (no cookie) hits a protected route.
+        status, _ = _raw_request(port, "/api/servers")
+        assert status == 401, (
+            f"Chain B still ends open: anonymous /api/servers returned {status}, expected 401"
+        )
+
+        status, body = _raw_request(port, "/api/auth/status")
+        assert json.loads(body).get("auth_enabled") is True
+    finally:
+        _stop_server(proc)
