@@ -58,10 +58,16 @@ _ALLOWED_APP_CONFIG_KEYS = {
 async def get_app_config_value(key: str):
     """Read a single app_config value. Returns {success, key, value}.
 
+    SEC-07 (F11): the key must be in the SAME allow-list the PUT path enforces.
+    Without it the endpoint served any app_config row by name — `session_secret`
+    included — to any caller holding a session (real, stolen, or forged).
+
     Bool-shaped storage convention: values stored as 'true'/'false' strings are
     coerced back to JSON booleans in the response so the frontend can use
     them directly. Missing rows return value=None (not an error).
     """
+    if key not in _ALLOWED_APP_CONFIG_KEYS:
+        return {"success": False, "error": "key_not_allowed"}
     from backend.main import db
     raw = await db.get_config(key, default=None)
     if raw is None:
