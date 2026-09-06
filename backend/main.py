@@ -391,6 +391,34 @@ app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"]
 app.include_router(module_router, prefix="/api/admin/modules", tags=["Modules"], dependencies=[Depends(require_auth)])
 
 
+def _resolve_spa_file(full_path: str, root: Path) -> Path | None:
+    """Resolve a SPA request path to a contained file under ``root``.
+
+    SEC-01 (F1): the catch-all is the only pre-auth request handler in the app,
+    so an escaping path here is an unauthenticated arbitrary-file read. Returns
+    the canonicalised file when it is BOTH inside ``root`` and an existing file;
+    returns None in every other case, meaning "fall back to index.html".
+
+    None is returned (rather than raising) so the handler never leaks the reason
+    a path was refused, and never turns a hostile path into a 500:
+    ``Path.resolve()`` raises ValueError on an embedded NUL byte, and an
+    over-long / UNC-shaped path can stall resolution on a network lookup.
+    """
+    if not full_path or len(full_path) > 1024:
+        return None
+    if "\x00" in full_path:
+        return None
+    try:
+        candidate = (root / full_path).resolve()
+    except (ValueError, OSError):
+        return None
+    if not candidate.is_relative_to(root):
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
 def _mount_spa(app: FastAPI) -> None:
     """Register static file serving and SPA fallback route.
 
@@ -412,6 +440,8 @@ def _mount_spa(app: FastAPI) -> None:
         except Exception:
             pass  # Already mounted (e.g., during --reload; ignore duplicate)
 
+    spa_root = static_dir.resolve()
+
     # SPA fallback: non-API routes return index.html for React Router.
     # API paths (/api/*) that don't match a registered route return 404 —
     # this is critical for FIX-04: disabled modules must return 404, not 200.
@@ -420,15 +450,17 @@ def _mount_spa(app: FastAPI) -> None:
         from fastapi import HTTPException
 
         # Reject unmatched /api/* paths so disabled modules return 404 (not SPA).
+        # MUST stay first: this is the FIX-04 disabled-module contract.
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
 
-        # Try to serve the exact file first (favicon.svg, etc.)
-        file_path = static_dir / full_path
-        if full_path and file_path.is_file():
+        # Try to serve the exact file first (favicon.svg, etc.), but only when
+        # it is contained under the SPA root (SEC-01 / F1).
+        file_path = _resolve_spa_file(full_path, spa_root)
+        if file_path is not None:
             return FileResponse(file_path)
         # Otherwise return index.html for React Router
-        return FileResponse(static_dir / "index.html")
+        return FileResponse(spa_root / "index.html")
 
 
 # === CLI entry point ===
