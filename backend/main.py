@@ -319,6 +319,16 @@ async def lifespan(app: FastAPI):
     effective_host = getattr(app.state, "effective_host", None) or config.server.host
     effective_port = getattr(app.state, "effective_port", None) or config.server.port
     logger.info("%s started on %s:%d", APP_NAME, effective_host, effective_port)
+    # A bind reachable from the network without TLS puts the session cookie and every BMC
+    # password typed into the UI on the wire in clear text. Refusing to start is not right
+    # (a trusted LAN is a legitimate choice), but the operator should be told rather than
+    # have to infer it.
+    if effective_host not in ("127.0.0.1", "::1", "localhost") and not config.server.https:
+        logger.warning(
+            "Listening on %s without TLS — session cookies and BMC credentials are sent "
+            "in cleartext. Enable https in config.yaml or terminate TLS at a proxy.",
+            effective_host,
+        )
     if config.demo:
         logger.info("Demo mode active — 6 virtual servers (one per vendor) with simulated data")
 
@@ -799,6 +809,8 @@ def cli():
             else:
                 uvicorn_kwargs["ssl_certfile"] = early_cfg.server.cert_file
                 uvicorn_kwargs["ssl_keyfile"] = early_cfg.server.key_file
+        if early_cfg is not None and early_cfg.server.forwarded_allow_ips:
+            uvicorn_kwargs["forwarded_allow_ips"] = early_cfg.server.forwarded_allow_ips
         uvicorn.run("backend.main:app", **uvicorn_kwargs)
         return
 
@@ -1060,6 +1072,8 @@ def cli():
                 if iter_cfg.server.https and iter_cfg.server.cert_file and iter_cfg.server.key_file:
                     cfg_kwargs["ssl_certfile"] = iter_cfg.server.cert_file
                     cfg_kwargs["ssl_keyfile"] = iter_cfg.server.key_file
+                if iter_cfg.server.forwarded_allow_ips:
+                    cfg_kwargs["forwarded_allow_ips"] = iter_cfg.server.forwarded_allow_ips
 
                 uconfig = uvicorn.Config(
                     "backend.main:app",

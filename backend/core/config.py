@@ -39,6 +39,11 @@ class ServerConfig:
     https: bool = False
     cert_file: str | None = None
     key_file: str | None = None
+    # Which peers are allowed to set X-Forwarded-Proto/For. Only 127.0.0.1 is trusted by
+    # default, so a TLS proxy in another container reaches us from a bridge address, its
+    # forwarded scheme is discarded, and the session cookie silently loses its Secure
+    # flag. Set this to the proxy's address to make the cookie correct behind it.
+    forwarded_allow_ips: str | None = None
 
 
 @dataclass
@@ -95,6 +100,7 @@ def _apply_env_overrides(config: AppConfig) -> None:
     env_map = {
         "IPMIDECK_SERVER_HOST": ("server", "host"),
         "IPMIDECK_SERVER_PORT": ("server", "port", int),
+        "IPMIDECK_SERVER_FORWARDED_ALLOW_IPS": ("server", "forwarded_allow_ips"),
         "IPMIDECK_AUTH_ENABLED": ("auth", "enabled", lambda v: v.lower() in ("true", "1", "yes")),
         "IPMIDECK_AUTH_SESSION_EXPIRY": ("auth", "session_expiry"),
         "IPMIDECK_IPMI_POLL_INTERVAL": ("ipmi", "poll_interval", int),
