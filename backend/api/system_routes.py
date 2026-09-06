@@ -341,6 +341,14 @@ async def restore(request: Request):
     """
     from backend.main import config
 
+    # The archive arrives as the raw request body, so the content type is the only
+    # declaration of intent available. Requiring it stops a cross-origin form POST —
+    # which can only ever carry a form or text content type — from reaching the
+    # extractor at all.
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if content_type != "application/zip":
+        return {"success": False, "error": "Expected a zip archive (Content-Type: application/zip)"}
+
     data_dir = Path(config.data.db_path).parent
     staging = data_dir / "staging"
     if staging.exists():

@@ -14,9 +14,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from typing import Annotated
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import Cookie, Depends, FastAPI, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.core.auth import AuthManager, require_auth
@@ -336,6 +338,58 @@ app = FastAPI(
     version=VERSION,
     lifespan=lifespan,
 )
+
+
+# Methods that can change state. Safe methods are never blocked: a cross-origin GET
+# cannot be turned into a write, and blocking them would break ordinary links.
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _same_authority(candidate: str, host_header: str, request_scheme: str) -> bool:
+    """Return True if ``candidate`` (an Origin/Referer URL) targets this exact server.
+
+    The comparison is on the AUTHORITY — host AND port. Cookie same-site rules treat
+    every port on a host as one site, so another service listening on a different port
+    of the same machine can drive authenticated requests here; comparing the port is
+    exactly what closes that.
+
+    The scheme is only enforced when the request itself arrived over TLS. Behind a
+    TLS-terminating proxy the app sees plain http and cannot know its external scheme,
+    so demanding an exact scheme match would reject every proxied deployment.
+    """
+    parsed = urlsplit(candidate)
+    if not parsed.netloc:
+        return False
+    if request_scheme == "https" and parsed.scheme and parsed.scheme != "https":
+        return False
+    return parsed.netloc.lower() == host_header.lower()
+
+
+@app.middleware("http")
+async def _origin_guard(request, call_next):
+    """Reject state-changing requests a foreign origin caused the browser to send.
+
+    Several endpoints take no request body, so a browser can submit them cross-origin
+    as a simple request — no preflight, cookies attached — and the app had no way to
+    tell that apart from a click in its own UI.
+
+    A request with NO Origin and NO Referer is allowed through: command-line clients,
+    the container health check and server-to-server callers legitimately send neither,
+    and rejecting them would break every non-browser integration to stop an attack only
+    a browser can mount. Browsers always attach Origin to a cross-origin state-changing
+    request, so "present and pointing elsewhere" is the signal worth acting on.
+    """
+    if request.method in _STATE_CHANGING_METHODS:
+        stated = request.headers.get("origin") or request.headers.get("referer")
+        host_header = request.headers.get("host")
+        if stated and host_header and not _same_authority(
+            stated, host_header, request.url.scheme
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={"success": False, "error": "Cross-origin request rejected"},
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")

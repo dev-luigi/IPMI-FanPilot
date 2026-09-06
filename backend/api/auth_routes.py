@@ -28,7 +28,7 @@ def _set_session_cookie(response: Response, request: Request, token: str, max_ag
         key="session",
         value=token,
         httponly=True,
-        samesite="lax",
+        samesite="strict",
         max_age=max_age,
         secure=request.url.scheme == "https",
     )
