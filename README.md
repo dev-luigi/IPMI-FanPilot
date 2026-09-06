@@ -279,6 +279,78 @@ ipmideck/
 - ipmitool arguments are passed as a list, never through a shell (no shell-injection surface)
 - Optional HTTPS/TLS for the dashboard, with one-click self-signed certificate generation
 
+### Rotating the session signing secret
+
+Session cookies are stateless HMACs signed with a per-install secret held in the database. Anyone
+who obtains a copy of that database — a stolen backup, an old archive, a disk image — can mint
+valid session cookies for your account indefinitely, and no password change will stop them.
+Rotating the secret is what actually evicts them:
+
+```bash
+# 1. stop IPMIDeck — the running process holds the secret in memory
+# 2. rotate
+ipmideck rotate-session-secret
+# 3. start IPMIDeck again
+```
+
+Every existing session is invalidated, so **every operator (including you) must log in again**.
+Credentials are unchanged — only the signing key is replaced.
+
+Run it against a **stopped** app. Rotating while the app is running rewrites the stored secret,
+but the live process keeps serving with the old one in memory until it restarts, so nobody is
+actually evicted until step 3.
+
+### Backups contain your credentials
+
+The encryption key living outside the database means a stolen **database alone** decrypts nothing.
+That is not true of a **backup archive**: the archive bundles
+
+- `encryption.key` — the AES-256 key for your BMC credentials,
+- the SQLite database — the admin password hash, every BMC host and its encrypted credentials,
+- the configuration.
+
+Together those are everything an attacker needs. **Store a backup archive exactly as carefully as
+the credentials themselves** — encrypted at rest, never in a shared or cloud folder by default.
+
+**Patching is not evicting.** Applying a security update closes the door, but it cannot un-disclose
+data an attacker has already copied. If you believe an archive or database was taken, recover fully:
+
+1. `ipmideck rotate-session-secret` (invalidates every cookie minted from the copy),
+2. rotate the at-rest key: replace `<data_dir>/encryption.key` and **re-enter the BMC credentials**
+   for every server, so the copied ciphertext no longer decrypts,
+3. change the dashboard account password,
+4. change the BMC passwords themselves on the hardware,
+5. **delete the old archives** and take a fresh backup.
+
+### Known limitation: the first-run window (SEC-04, SEC-06)
+
+**A freshly started, not-yet-configured instance is claimable by anyone who can reach it.** This is
+a known, measured limitation, deferred rather than fixed — stated here rather than left for you to
+discover.
+
+What is delivered: **completing first-run setup always re-enables authentication.** An instance
+cannot be left silently open behind your back — the moment you finish setup the login page is
+enforced, and an anonymous request to a protected route gets a 401 (measured).
+
+What is **not** delivered (**SEC-04**, first clause, deferred onto **SEC-06**): an anonymous caller
+who reaches a *not-yet-configured* instance can still turn authentication off, and can still
+complete setup and claim the instance. Before any account exists, nothing in an HTTP request
+distinguishes you from anyone else on the network; telling you apart requires an out-of-band
+secret (a token printed to the console at first start), which is exactly the SEC-06 mechanism and
+is not implemented yet.
+
+- **The window opens** when the instance first starts, and **closes the moment you complete
+  first-run setup.** Nothing after setup is affected.
+- **What it exposes:** ownership of an unconfigured appliance. A genuinely fresh instance holds no
+  servers and no BMC credentials, so it is not a path to existing secrets — it is a path to
+  claiming an instance you have not claimed yet.
+- **What to do:** perform the **first setup on a trusted network**, and complete it promptly
+  rather than leaving a freshly started instance unattended or exposed.
+
+Once an account exists this window is closed: rewriting the account requires the current password,
+including on an instance with authentication disabled.
+
+
 ![IPMIDeck Settings — optional HTTPS/TLS with one-click self-signed certificate generation](docs/screenshots/settings-https.png)
 
 ![IPMIDeck Settings — local authentication enabled, with a confirm-with-password flow to disable it](docs/screenshots/settings-password.png)
