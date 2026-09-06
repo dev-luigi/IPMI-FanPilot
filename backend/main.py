@@ -338,6 +338,29 @@ app = FastAPI(
 )
 
 
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    """Attach defensive response headers to everything the app serves.
+
+    frame-ancestors (plus the legacy X-Frame-Options) keeps the dashboard out of a
+    hostile iframe, which is what turns a stolen click into a power-off. nosniff stops a
+    stored sensor string from being re-interpreted as script. no-referrer keeps LAN
+    hostnames out of Referer headers sent to third parties.
+
+    HSTS is emitted ONLY over an https request: sent over plain http it is ignored by
+    browsers, but if it ever were honoured on a LAN name it would strand the operator
+    with no way back to http.
+    """
+    response = await call_next(request)
+    response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return response
+
+
 # === WebSocket endpoint ===
 
 @app.websocket("/ws")
