@@ -81,3 +81,172 @@ def test_setup_leaves_auth_enabled_on_a_normal_first_run(client_auth):
     )
     assert r.status_code == 200 and r.json()["success"] is True
     assert client_auth.get("/api/auth/status").json()["auth_enabled"] is True
+
+
+# --- SEC-05 (F6 + F10) ----------------------------------------------------
+
+
+def _setup_account(client) -> None:
+    r = client.post("/api/auth/setup", json={"username": SETUP_USER, "password": SETUP_PASS})
+    assert r.status_code == 200 and r.json()["success"] is True
+
+
+def test_configure_without_current_password_is_refused(client_auth):
+    """An account exists: rewriting it requires proving knowledge of the password."""
+    _setup_account(client_auth)
+
+    r = client_auth.post(
+        "/api/auth/configure", json={"username": "attacker", "password": "attacker-password"}
+    )
+    assert r.status_code == 200
+    assert r.json()["success"] is False
+
+    # The account is unchanged: the original credentials still authenticate.
+    client_auth.cookies.clear()
+    login = client_auth.post(
+        "/api/auth/login", json={"username": SETUP_USER, "password": SETUP_PASS}
+    )
+    assert login.json()["success"] is True
+
+
+def test_configure_with_a_wrong_current_password_is_refused(client_auth):
+    _setup_account(client_auth)
+
+    r = client_auth.post(
+        "/api/auth/configure",
+        json={
+            "username": "attacker",
+            "password": "attacker-password",
+            "current_password": "not-the-password",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["success"] is False
+
+    client_auth.cookies.clear()
+    login = client_auth.post(
+        "/api/auth/login", json={"username": SETUP_USER, "password": SETUP_PASS}
+    )
+    assert login.json()["success"] is True
+
+
+def test_configure_with_the_correct_current_password_succeeds(client_auth):
+    _setup_account(client_auth)
+
+    r = client_auth.post(
+        "/api/auth/configure",
+        json={
+            "username": "newadmin",
+            "password": "a-brand-new-password",
+            "current_password": SETUP_PASS,
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["success"] is True
+
+    client_auth.cookies.clear()
+    login = client_auth.post(
+        "/api/auth/login", json={"username": "newadmin", "password": "a-brand-new-password"}
+    )
+    assert login.json()["success"] is True
+
+
+def test_configure_is_gated_even_when_auth_is_disabled(client_auth):
+    """The F10 window — and the case D3's deferral of SEC-06 rests on.
+
+    An auth-DISABLED instance that still HAS an account could be seized with no
+    cookie at all. The gate keys on has_user(), not on auth_enabled, which is
+    the only keying that closes this.
+    """
+    _setup_account(client_auth)
+
+    # Disable auth the legitimate way (session + current password).
+    off = client_auth.post(
+        "/api/auth/toggle", json={"enabled": False, "current_password": SETUP_PASS}
+    )
+    assert off.json()["success"] is True
+    assert client_auth.get("/api/auth/status").json()["auth_enabled"] is False
+
+    # Now an anonymous caller tries to seize the account.
+    client_auth.cookies.clear()
+    r = client_auth.post(
+        "/api/auth/configure", json={"username": "attacker", "password": "attacker-password"}
+    )
+    assert r.status_code == 200
+    assert r.json()["success"] is False, "F10 window still open on an auth-disabled instance"
+
+    # And with the correct current password it still works for the real operator.
+    ok = client_auth.post(
+        "/api/auth/configure",
+        json={
+            "username": "realadmin",
+            "password": "a-brand-new-password",
+            "current_password": SETUP_PASS,
+        },
+    )
+    assert ok.json()["success"] is True
+
+
+def test_configure_on_an_account_less_instance_needs_no_current_password(client_auth):
+    """Genuine first run: nothing to prove, and the form must still work."""
+    client_auth.post("/api/auth/toggle", json={"enabled": False})
+    assert client_auth.get("/api/auth/status").json()["has_user"] is False
+
+    r = client_auth.post(
+        "/api/auth/configure", json={"username": "firstadmin", "password": "first-password"}
+    )
+    assert r.status_code == 200
+    assert r.json()["success"] is True
+    assert client_auth.get("/api/auth/status").json()["auth_enabled"] is True
+
+
+def test_stale_cookie_is_refused_by_configure(client_auth):
+    """Chain D: a signed-but-stale cookie must not rewrite the account."""
+    _setup_account(client_auth)
+    stale = dict(client_auth.cookies)
+
+    # Rotate the credentials legitimately; the held cookie goes stale.
+    client_auth.post(
+        "/api/auth/configure",
+        json={
+            "username": "newadmin",
+            "password": "a-brand-new-password",
+            "current_password": SETUP_PASS,
+        },
+    )
+
+    client_auth.cookies.clear()
+    r = client_auth.post(
+        "/api/auth/configure",
+        json={
+            "username": "attacker",
+            "password": "attacker-password",
+            "current_password": "a-brand-new-password",
+        },
+        cookies=stale,
+    )
+    assert r.status_code == 401, "a stale cookie was accepted by /configure"
+
+
+def test_stale_cookie_is_refused_by_toggle(client_auth):
+    """The same helper guards /toggle — a stale cookie cannot disable auth."""
+    _setup_account(client_auth)
+    stale = dict(client_auth.cookies)
+
+    client_auth.post(
+        "/api/auth/configure",
+        json={
+            "username": "newadmin",
+            "password": "a-brand-new-password",
+            "current_password": SETUP_PASS,
+        },
+    )
+
+    client_auth.cookies.clear()
+    r = client_auth.post(
+        "/api/auth/toggle",
+        json={"enabled": False, "current_password": "a-brand-new-password"},
+        cookies=stale,
+    )
+    assert r.status_code == 401, "a stale cookie was accepted by /toggle"
+    assert client_auth.get("/api/auth/status").json()["auth_enabled"] is True

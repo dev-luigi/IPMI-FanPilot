@@ -47,6 +47,10 @@ class SetupRequest(BaseModel):
 class ConfigureRequest(BaseModel):
     username: str
     password: str
+    # SEC-05 (F6/F10): required whenever an account already exists — including on an
+    # auth-DISABLED instance, which is the F10 window. Optional only at genuine first
+    # run (no account), where there is no password to prove knowledge of.
+    current_password: str | None = None
 
 
 class ToggleRequest(BaseModel):
@@ -169,9 +173,37 @@ async def configure_auth(body: ConfigureRequest, request: Request, response: Res
     endpoint is NOT an unauthenticated credential-takeover path. Issues a fresh session
     cookie for the new username so the operator stays logged in (and the new cookie
     passes the require_auth current-user check while any old-username cookie is rejected).
+
+    SEC-05 (F6, and F10 as a side effect): a valid-looking session was the ONLY thing
+    standing between a caller and a rewrite of the sole account — the exact action an
+    incident responder takes to evict an attacker. Proving knowledge of the CURRENT
+    password is now required whenever an account exists.
+
+    The gate keys on `has_user()`, NOT on `auth_enabled`. That keying is load-bearing:
+    keying on `auth_enabled` would leave the F10 window wide open, because an
+    auth-disabled instance with an existing account could be seized with no cookie at
+    all — and the frontend only shows this form when auth is OFF, so an `auth_enabled`
+    condition would never fire from the UI.
+
+    With no account present nothing is required: that is genuine first run.
     """
     from backend.main import auth
     await _require_session_if_active(request, auth)
+
+    if await auth.has_user():
+        if not body.current_password:
+            return {"success": False, "error": "Current password is required"}
+        # On an auth-disabled instance there is no session to name the current user,
+        # so fall back to the single stored account row (the users table is single-user).
+        token = request.cookies.get("session")
+        current_username = await auth.verify_session_token_async(token) if token else None
+        if not current_username:
+            row = await auth.db.fetchone("SELECT username FROM users LIMIT 1")
+            current_username = row["username"] if row else None
+        if not current_username or not await auth.verify_password(
+            current_username, body.current_password
+        ):
+            return {"success": False, "error": "Incorrect password"}
 
     try:
         await auth.replace_user(body.username, body.password)

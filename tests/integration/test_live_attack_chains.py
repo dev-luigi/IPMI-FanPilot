@@ -436,10 +436,15 @@ def test_password_change_evicts_the_retained_cookie(
         assert status == 200, "baseline: the cookie must work before the change"
 
         # Change the password through the real endpoint, carrying the session.
+        # SEC-05 (Plan 03) additionally requires the current password here.
         status, _, new_cookies = _post_json(
             port,
             "/api/auth/configure",
-            {"username": "changeop", "password": "a-brand-new-password"},
+            {
+                "username": "changeop",
+                "password": "a-brand-new-password",
+                "current_password": "original-password-value",
+            },
             headers=f"Cookie: {old_cookie}\r\n",
         )
         assert status == 200
@@ -558,3 +563,112 @@ def test_chain_b_end_state_is_closed_live(tmp_path_factory: pytest.TempPathFacto
         assert json.loads(body).get("auth_enabled") is True
     finally:
         _stop_server(proc)
+
+
+def test_chain_d_stale_cookie_cannot_seize_the_account_live(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """SEC-05 over real HTTP: a stale-but-signed cookie cannot rewrite the account.
+
+    This is the takeover that defeats incident response — /configure is exactly
+    what an operator uses to evict an attacker.
+    """
+    data_dir = tmp_path_factory.mktemp("chain-d")
+    port = _free_port()
+    proc = _spawn_server(data_dir, port)
+    try:
+        _await_ready(proc, port)
+        status, _, cookies = _post_json(
+            port,
+            "/api/auth/setup",
+            {"username": "chaindop", "password": "original-password-value"},
+        )
+        assert status == 200 and cookies
+        stale = cookies[0].split(";")[0]
+
+        # The operator rotates credentials; the held cookie goes stale.
+        status, _, _ = _post_json(
+            port,
+            "/api/auth/configure",
+            {
+                "username": "chaindop",
+                "password": "a-brand-new-password",
+                "current_password": "original-password-value",
+            },
+            headers=f"Cookie: {stale}\r\n",
+        )
+        assert status == 200
+
+        # The attacker replays the stale cookie against the takeover endpoint.
+        status, body, _ = _post_json(
+            port,
+            "/api/auth/configure",
+            {
+                "username": "attacker",
+                "password": "attacker-password",
+                "current_password": "a-brand-new-password",
+            },
+            headers=f"Cookie: {stale}\r\n",
+        )
+        assert status == 401, f"a stale cookie seized /configure (HTTP {status})"
+
+        # And with no cookie at all.
+        status, body, _ = _post_json(
+            port,
+            "/api/auth/configure",
+            {"username": "attacker", "password": "attacker-password"},
+        )
+        assert status == 401 or json.loads(body).get("success") is False
+
+        # The real operator's new credentials still work.
+        status, _, cookies = _post_json(
+            port,
+            "/api/auth/login",
+            {"username": "chaindop", "password": "a-brand-new-password"},
+        )
+        assert status == 200 and cookies
+        fresh = cookies[0].split(";")[0]
+        status, _ = _raw_request(port, "/api/servers", headers=f"Cookie: {fresh}\r\n")
+        assert status == 200
+    finally:
+        _stop_server(proc)
+
+
+def test_configure_requires_the_current_password_live(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Even a VALID session cannot rewrite the account without the password."""
+    data_dir = tmp_path_factory.mktemp("sec05-live")
+    port = _free_port()
+    proc = _spawn_server(data_dir, port)
+    try:
+        _await_ready(proc, port)
+        status, _, cookies = _post_json(
+            port,
+            "/api/auth/setup",
+            {"username": "sec05op", "password": "original-password-value"},
+        )
+        assert status == 200 and cookies
+        cookie = cookies[0].split(";")[0]
+
+        status, body, _ = _post_json(
+            port,
+            "/api/auth/configure",
+            {"username": "attacker", "password": "attacker-password"},
+            headers=f"Cookie: {cookie}\r\n",
+        )
+        assert status == 200
+        assert json.loads(body).get("success") is False, (
+            "a valid session alone still rewrote the account"
+        )
+
+        # The original account is untouched.
+        status, body, _ = _post_json(
+            port,
+            "/api/auth/login",
+            {"username": "sec05op", "password": "original-password-value"},
+        )
+        assert json.loads(body).get("success") is True
+    finally:
+        _stop_server(proc)
+

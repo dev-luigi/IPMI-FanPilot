@@ -21,6 +21,11 @@ export function SecuritySection({ headingRef }: SecuritySectionProps) {
   const { t } = useTranslation();
   const { online, offlineTip } = useSettings();
   const authEnabled = useAuthStore((s) => s.authEnabled);
+  // SEC-05: the enable-auth branch renders in TWO states — "auth off + account exists"
+  // (the F10 window, where the backend now demands the current password) and
+  // "auth off + no account" (genuine first run, where it correctly demands nothing).
+  // Guarding unconditionally would block the operator on a password that does not exist.
+  const hasUser = useAuthStore((s) => s.hasUser);
 
   const [secUsername, setSecUsername] = useState("");
   const [secPassword, setSecPassword] = useState("");
@@ -38,13 +43,22 @@ export function SecuritySection({ headingRef }: SecuritySectionProps) {
       toast.error(t("settings.passwordsDoNotMatch"));
       return;
     }
+    if (hasUser && !secCurrentPassword.trim()) {
+      toast.error(t("settings.currentPasswordRequired"));
+      return;
+    }
     setSecBusy(true);
     try {
-      await post("/api/auth/configure", { username: secUsername, password: secPassword });
+      await post("/api/auth/configure", {
+        username: secUsername,
+        password: secPassword,
+        ...(hasUser ? { current_password: secCurrentPassword } : {}),
+      });
       useAuthStore.setState({ authEnabled: true, authenticated: true, hasUser: true, username: secUsername });
       setSecUsername("");
       setSecPassword("");
       setSecPasswordConfirm("");
+      setSecCurrentPassword("");
       toast.success(t("settings.authEnabledToast"));
     } catch {
       toast.error(t("settings.authEnableFailed"));
@@ -152,6 +166,15 @@ export function SecuritySection({ headingRef }: SecuritySectionProps) {
             />
             {secPassword && secPasswordConfirm && secPassword !== secPasswordConfirm && (
               <p className="text-xs text-danger">{t("settings.passwordsDoNotMatch")}</p>
+            )}
+            {hasUser && (
+              <input
+                type="password"
+                placeholder={t("settings.currentPasswordPlaceholder")}
+                value={secCurrentPassword}
+                onChange={(e) => setSecCurrentPassword(e.target.value)}
+                className={cn(inputClass, "font-mono")}
+              />
             )}
             <button onClick={enableAuth} disabled={secBusy || !online} title={offlineTip} className={primaryBtnClass}>
               {t("settings.enableAuth")}
