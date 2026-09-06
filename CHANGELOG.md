@@ -10,7 +10,7 @@ into a new dated `## [<version>] - YYYY-MM-DD` section.
 
 ## [Unreleased]
 
-> ### ⚠️ Upgrading logs everyone out — once
+> ### Upgrading logs everyone out — once
 >
 > **Every existing session is invalidated by this upgrade. Each operator must log in again
 > exactly once.** Nothing is lost and no credentials change; the login page simply appears the
@@ -25,7 +25,6 @@ into a new dated `## [<version>] - YYYY-MM-DD` section.
 > If you are reading this **while responding to an incident**, the companion action is the new
 > `ipmideck rotate-session-secret` command: it replaces the session signing secret, so cookies
 > minted offline from a copied or stolen database stop working. Stop the app, run it, restart.
-> See the Security section of the README for the full runbook.
 
 ### Security
 
@@ -40,7 +39,8 @@ into a new dated `## [<version>] - YYYY-MM-DD` section.
   revoked nothing.
 - **Completing first-run setup always leaves authentication enabled (SEC-04).** An instance whose
   authentication had been switched off before setup used to stay open permanently, with no visible
-  symptom. See the Security section of the README for what remains open before first run.
+  symptom. Note that a freshly started, not-yet-configured instance is still claimable by anyone
+  who can reach it, until first-run setup is completed.
 - **Rewriting the account now requires the current password (SEC-05).** A valid-looking session
   cookie alone could previously replace the sole account through the Security settings — including
   on an instance with authentication disabled. The Security form has one new
@@ -48,8 +48,8 @@ into a new dated `## [<version>] - YYYY-MM-DD` section.
 - **The app-config endpoint no longer returns the session secret (SEC-07).** The read path now
   enforces the same allow-list the write path already had.
 - **`reset-password` no longer reports success for a username that does not exist (F17).**
-- **Backup archives are now documented as credential-grade (SEC-08).** An archive bundles the
-  encryption key, the database and the configuration together — see the README.
+- **Backup archives are credential-grade.** An archive bundles the encryption key, the database
+  and the configuration together, so it must be stored as carefully as the credentials themselves.
 
 
 ## [2.0.1] - 2026-07-25

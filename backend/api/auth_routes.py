@@ -145,8 +145,8 @@ async def setup(body: SetupRequest, request: Request, response: Response, lang: 
     """First-run account creation. Always leaves authentication ENABLED.
 
     SEC-04 clause 2 (F5): an anonymous caller can disable auth on a
-    not-yet-configured instance (that clause is deferred onto SEC-06 — see the
-    README Security advisory), and `setup` used to create the account without
+    not-yet-configured instance (that clause is deferred onto SEC-06), and
+    `setup` used to create the account without
     touching the flag. The instance therefore stayed open forever, with no UI
     symptom, even after the real operator finished first run.
 

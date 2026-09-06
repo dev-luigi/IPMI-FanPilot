@@ -298,9 +298,11 @@ class AuthManager:
         forever — patching the read path (SEC-01/SEC-07) stops NEW disclosures but
         cannot un-disclose a secret already taken. This is the eviction move.
 
-        Generates a fresh secret, persists it, and assigns it to `self._secret` so
-        a running process picks it up immediately. Returns the new secret so the
-        caller can confirm it changed (it is not printed to the operator).
+        Generates a fresh secret, persists it, and assigns it to `self._secret`.
+        Note the CLI action runs in a SEPARATE process: a server that is already
+        running keeps serving with the old secret held in memory, so the supported
+        sequence is stop -> rotate -> start. Returns the new secret so the caller
+        can confirm it changed (it is not printed to the operator).
 
         Deliberately does NOT touch `self._file_key`: the at-rest credential key
         has a different lifecycle (see the four-case migration in `initialize()`)
@@ -490,7 +492,7 @@ class AuthManager:
 
         Signature + expiry only. The credential-fingerprint claim is checked by
         `verify_session_token_async()`, which needs a DB read; every request path
-        that authenticates a cookie MUST use that one (see D1 / fail-closed).
+        that authenticates a cookie MUST use that one (see the fail-closed rule there).
         """
         try:
             b64_part, sig_part = token.rsplit(".", 1)
@@ -513,7 +515,7 @@ class AuthManager:
     async def verify_session_token_async(self, token: str) -> str | None:
         """Full session verification: signature, expiry, AND credential binding.
 
-        SEC-03 / D1 — **FAIL-CLOSED**. A token whose payload carries no `cfp`
+        SEC-03 — **FAIL-CLOSED**. A token whose payload carries no `cfp`
         claim is REJECTED. That is the whole point of the change: a forged token
         (minted from a stolen signing secret) omits the claim in exactly the same
         way a pre-upgrade token does, so treating "absent" as acceptable would
@@ -546,7 +548,7 @@ class AuthManager:
 
         claim = payload.get("cfp")
         if not claim:
-            return None  # D1 fail-closed: absent claim == forged or pre-upgrade
+            return None  # fail-closed: absent claim == forged or pre-upgrade
         current = await self._credential_fingerprint(username)
         if current is None:
             return None  # token subject is no longer the stored user

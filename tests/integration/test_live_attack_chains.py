@@ -1,6 +1,6 @@
 """Live attack-chain replay — a REAL server, raw HTTP over a socket.
 
-This is the empirical proof Phase 10 is judged on. It boots `backend.main:app`
+This is the empirical proof these fixes are judged on. It boots `backend.main:app`
 under uvicorn as a subprocess (temp data dir, demo mode) and speaks raw HTTP so
 percent-encoded escapes arrive at the handler exactly as an attacker sends
 them — no client library normalises them away first.
@@ -16,6 +16,7 @@ they drive their own event loop, and this test owns a real process instead.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -59,9 +60,26 @@ def _raw_request(port: int, raw_target: str, headers: str = "") -> tuple[int, by
     return status, body
 
 
+# OS-level variables the interpreter itself needs to start at all. The spawned
+# environment is otherwise deliberately minimal, so a stray IPMIDECK_* var in the
+# developer's shell cannot influence the run. On Windows a bare env kills the
+# process before any app code runs: without SystemRoot, WSAStartup fails inside
+# asyncio's proactor loop (WinError 10106), and pyfiglet raises KeyError without
+# APPDATA.
+# Compared upper-cased: iterating os.environ on Windows yields upper-case keys
+# (SYSTEMROOT), even though lookups on it are case-insensitive.
+_OS_ENV_PASSTHROUGH = frozenset({
+    "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT",
+    "APPDATA", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP",
+})
+
+
 def _server_env(data_dir: Path) -> dict[str, str]:
-    return {
-        "PATH": "/usr/bin:/bin:/usr/local/bin",
+    env = {k: v for k, v in os.environ.items() if k.upper() in _OS_ENV_PASSTHROUGH}
+    env.update({
+        # A hardcoded POSIX PATH is meaningless on Windows, where the interpreter
+        # also resolves DLLs through it.
+        "PATH": os.environ.get("PATH", "") if os.name == "nt" else "/usr/bin:/bin:/usr/local/bin",
         "HOME": str(data_dir),
         "IPMIDECK_DEMO": "true",
         "IPMIDECK_DATA_DIR": str(data_dir),
@@ -70,7 +88,8 @@ def _server_env(data_dir: Path) -> dict[str, str]:
         "PYTHONPATH": str(REPO_ROOT),
         "NO_COLOR": "1",
         "TERM": "dumb",
-    }
+    })
+    return env
 
 
 def _spawn_server(data_dir: Path, port: int) -> subprocess.Popen:
@@ -106,6 +125,7 @@ def _await_ready(proc: subprocess.Popen, port: int) -> None:
             if status == 200:
                 return
         except OSError:
+            # Connection refused until uvicorn binds — keep polling until the deadline.
             pass
         time.sleep(0.25)
     pytest.fail(f"server did not answer /api/health within {BOOT_TIMEOUT_S}s")
@@ -340,7 +360,7 @@ def _rotate_secret_via_cli(data_dir: Path) -> None:
 def test_stop_rotate_restart_refuses_the_retained_cookie(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """ROADMAP criterion 3: a token minted from a copied DB dies on rotation.
+    """A token minted from a copied DB dies on rotation.
 
     Replayed as the operator actually performs it, because the running process
     holds the secret in memory:
@@ -349,7 +369,7 @@ def test_stop_rotate_restart_refuses_the_retained_cookie(
         2. ipmideck rotate-session-secret
         3. start IPMIDeck
 
-    This is the exact sequence 10-03 documents in README's Security section.
+    This is the documented stop-rotate-restart sequence.
     """
     data_dir = tmp_path_factory.mktemp("rotate-chain")
     port = _free_port()
@@ -413,7 +433,7 @@ def test_stop_rotate_restart_refuses_the_retained_cookie(
 def test_password_change_evicts_the_retained_cookie(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """ROADMAP criterion 4, over real HTTP: the advertised eviction move evicts.
+    """Over real HTTP: the advertised eviction move evicts.
 
     Chain D's counter-proof. `/configure` changes the account password; the
     cookie held from before the change must be refused on a protected route AND
@@ -436,7 +456,7 @@ def test_password_change_evicts_the_retained_cookie(
         assert status == 200, "baseline: the cookie must work before the change"
 
         # Change the password through the real endpoint, carrying the session.
-        # SEC-05 (Plan 03) additionally requires the current password here.
+        # SEC-05 additionally requires the current password here.
         status, _, new_cookies = _post_json(
             port,
             "/api/auth/configure",
@@ -469,7 +489,7 @@ def test_password_change_evicts_the_retained_cookie(
 def test_claimless_forged_cookie_is_refused_over_http(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """D1 fail-closed at the route layer: a perfectly-signed claim-less token.
+    """Fail-closed at the route layer: a perfectly-signed claim-less token.
 
     Built the way an attacker with the stolen signing secret would: read the
     secret out of the DB, mint a token with a valid signature and no `cfp`

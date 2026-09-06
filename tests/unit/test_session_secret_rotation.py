@@ -2,7 +2,7 @@
 
 Split by subject:
   * rotation of the session signing secret (SEC-02 / F2)
-  * binding session tokens to a credential fingerprint, fail-closed (SEC-03 / F7, D1)
+  * binding session tokens to a credential fingerprint, fail-closed (SEC-03 / F7)
   * `update_password` reporting honestly when it changed nothing (F17)
 
 Manager level on purpose: the fail-closed rule has to be proven at the source, not
@@ -101,7 +101,7 @@ async def test_rotation_does_not_touch_the_at_rest_credential_key(auth_manager) 
     assert am.get_encryption_key() == key_before
 
 
-# --- SEC-03 / F7 — credential fingerprint, fail-closed (D1) ----------------
+# --- SEC-03 / F7 — credential fingerprint, fail-closed ---------------------
 
 
 async def test_fresh_token_verifies(auth_manager) -> None:
@@ -141,7 +141,7 @@ async def test_new_token_after_password_change_works(auth_manager) -> None:
 
 
 async def test_claimless_token_is_rejected_fail_closed(auth_manager) -> None:
-    """D1: a correctly-signed token with no cfp claim is REFUSED.
+    """A correctly-signed token with no cfp claim is REFUSED.
 
     This is both the pre-upgrade token and the forged token — they are
     byte-indistinguishable on this point, which is why absence cannot mean

@@ -1,4 +1,4 @@
-"""SEC-04 / SEC-05 route-level hardening tests (Phase 10, Plan 03).
+"""SEC-04 / SEC-05 route-level hardening tests.
 
 Everything here goes through HTTP with the synchronous `client_auth` fixture —
 never `await bm.auth...` — because those fixtures drive their own event loop
@@ -152,7 +152,7 @@ def test_configure_with_the_correct_current_password_succeeds(client_auth):
 
 
 def test_configure_is_gated_even_when_auth_is_disabled(client_auth):
-    """The F10 window — and the case D3's deferral of SEC-06 rests on.
+    """The F10 window — and the case the SEC-06 deferral rests on.
 
     An auth-DISABLED instance that still HAS an account could be seized with no
     cookie at all. The gate keys on has_user(), not on auth_enabled, which is
