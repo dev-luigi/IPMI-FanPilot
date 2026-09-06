@@ -47,6 +47,10 @@ class SetupRequest(BaseModel):
 class ConfigureRequest(BaseModel):
     username: str
     password: str
+    # SEC-05 (F6/F10): required whenever an account already exists — including on an
+    # auth-DISABLED instance, which is the F10 window. Optional only at genuine first
+    # run (no account), where there is no password to prove knowledge of.
+    current_password: str | None = None
 
 
 class ToggleRequest(BaseModel):
@@ -68,7 +72,7 @@ async def _require_session_if_active(request: Request, auth) -> None:
     """
     if await auth.is_auth_enabled() and await auth.has_user():
         token = request.cookies.get("session")
-        if not token or not auth.verify_session_token(token):
+        if not token or not await auth.verify_session_token_async(token):
             raise HTTPException(status_code=401, detail={"error": "unauthorized"})
 
 
@@ -79,7 +83,7 @@ async def get_me(request: Request):
     if not await auth.is_auth_enabled():
         return {"authenticated": True, "username": "local", "auth_enabled": False, "has_user": has_user}
     token = request.cookies.get("session")
-    username = auth.verify_session_token(token) if token else None
+    username = await auth.verify_session_token_async(token) if token else None
     # REVIEWS #7: mirror require_auth — a token whose subject is no longer the current
     # stored user (e.g. after a credential replace) is NOT authenticated. Keeps /me
     # consistent with protected routes so the frontend boot routing sees the same state.
@@ -125,7 +129,7 @@ async def login(body: LoginRequest, request: Request, response: Response, lang: 
 
     # 3. Success: clear any prior failure counter, issue session.
     await auth.reset_failures(body.username)
-    token = auth.create_session_token(body.username)
+    token = await auth.create_session_token_async(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
@@ -138,11 +142,24 @@ async def logout(response: Response):
 
 @router.post("/setup")
 async def setup(body: SetupRequest, request: Request, response: Response, lang: str = Depends(get_lang)):
+    """First-run account creation. Always leaves authentication ENABLED.
+
+    SEC-04 clause 2 (F5): an anonymous caller can disable auth on a
+    not-yet-configured instance (that clause is deferred onto SEC-06), and
+    `setup` used to create the account without
+    touching the flag. The instance therefore stayed open forever, with no UI
+    symptom, even after the real operator finished first run.
+
+    Re-enabling unconditionally removes the DURABILITY and the SILENCE of that
+    attack: whatever the flag was beforehand, completing first run closes the
+    instance and the login page is enforced from then on.
+    """
     from backend.main import auth
     if await auth.has_user():
         return {"success": False, "error": t("user_already_exists", lang)}
     await auth.create_user(body.username, body.password)
-    token = auth.create_session_token(body.username)
+    await auth.set_auth_enabled(True)
+    token = await auth.create_session_token_async(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
@@ -156,15 +173,44 @@ async def configure_auth(body: ConfigureRequest, request: Request, response: Res
     endpoint is NOT an unauthenticated credential-takeover path. Issues a fresh session
     cookie for the new username so the operator stays logged in (and the new cookie
     passes the require_auth current-user check while any old-username cookie is rejected).
+
+    SEC-05 (F6, and F10 as a side effect): a valid-looking session was the ONLY thing
+    standing between a caller and a rewrite of the sole account — the exact action an
+    incident responder takes to evict an attacker. Proving knowledge of the CURRENT
+    password is now required whenever an account exists.
+
+    The gate keys on `has_user()`, NOT on `auth_enabled`. That keying is load-bearing:
+    keying on `auth_enabled` would leave the F10 window wide open, because an
+    auth-disabled instance with an existing account could be seized with no cookie at
+    all — and the frontend only shows this form when auth is OFF, so an `auth_enabled`
+    condition would never fire from the UI.
+
+    With no account present nothing is required: that is genuine first run.
     """
     from backend.main import auth
     await _require_session_if_active(request, auth)
+
+    if await auth.has_user():
+        if not body.current_password:
+            return {"success": False, "error": "Current password is required"}
+        # On an auth-disabled instance there is no session to name the current user,
+        # so fall back to the single stored account row (the users table is single-user).
+        token = request.cookies.get("session")
+        current_username = await auth.verify_session_token_async(token) if token else None
+        if not current_username:
+            row = await auth.db.fetchone("SELECT username FROM users LIMIT 1")
+            current_username = row["username"] if row else None
+        if not current_username or not await auth.verify_password(
+            current_username, body.current_password
+        ):
+            return {"success": False, "error": "Incorrect password"}
+
     try:
         await auth.replace_user(body.username, body.password)
     except ValueError as e:
         return {"success": False, "error": str(e)}
     await auth.set_auth_enabled(True)
-    token = auth.create_session_token(body.username)
+    token = await auth.create_session_token_async(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)
     return {"success": True, "username": body.username}
 
@@ -209,7 +255,7 @@ async def toggle_auth(body: ToggleRequest, request: Request, lang: str = Depends
                 "error": "Current password is required to disable authentication",
             }
         token = request.cookies.get("session")
-        username = auth.verify_session_token(token) if token else None
+        username = await auth.verify_session_token_async(token) if token else None
         if not username or not await auth.verify_password(username, body.current_password):
             return {"success": False, "error": "Incorrect password"}
 
