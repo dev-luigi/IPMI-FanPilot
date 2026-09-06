@@ -300,6 +300,18 @@ async def lifespan(app: FastAPI):
         ctx, config.modules, persisted_enabled=persisted_enabled
     )
 
+    # Turn the OpenAPI pages back on for a demo instance or a debug-level run. This MUST
+    # happen before the module routes and the SPA catch-all are registered below: the
+    # catch-all swallows every path registered after it, so a later setup() would produce
+    # routes that never match. The None check is required — lifespan re-enters for every
+    # app instance a test builds, and re-running setup() unguarded appends a duplicate set
+    # of routes each time.
+    if (config.demo or config.logging.level.lower() == "debug") and app.openapi_url is None:
+        app.openapi_url = "/openapi.json"
+        app.docs_url = "/docs"
+        app.redoc_url = "/redoc"
+        app.setup()
+
     # FIX-04: dynamically mount only enabled modules' routes (with auth guard).
     # Disabled modules will never have their routes registered → 404 instead of 200.
     # IMPORTANT: must happen BEFORE the SPA fallback route is registered so FastAPI
@@ -343,10 +355,17 @@ async def lifespan(app: FastAPI):
 
 # === FastAPI App ===
 
+# The interactive OpenAPI pages are constructed disabled and re-enabled inside lifespan()
+# for a demo instance or a debug-level run. They map every route in the app for an
+# anonymous caller, which is reconnaissance we don't owe a stranger; in a demo the API is
+# the thing being shown, and at debug level the operator asked for the detail.
 app = FastAPI(
     title=APP_NAME,
     version=VERSION,
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 

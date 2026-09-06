@@ -466,26 +466,27 @@ async def history_csv(server_id: str, sensor_name: str, range: str = "24h"):
 
 @router.get("/health")
 async def health():
-    from backend.core.branding import VERSION
-    from backend.main import config, ws_manager, module_loader
-    return {
-        "status": "ok",
-        "version": VERSION,
-        "demo": config.demo,
-        "websocket_connections": ws_manager.connection_count,
-        "modules_loaded": len(module_loader.get_enabled_modules()),
-        "time": datetime.utcnow().isoformat() + "Z",
-    }
+    """Liveness only.
+
+    This endpoint is unauthenticated so a container orchestrator can reach it, which
+    means everything it returns is public. The build version, module count and live
+    connection count told an anonymous scanner which release to look up exploits for and
+    whether anyone was watching; the authenticated config endpoint carries that same
+    detail for the UI.
+    """
+    return {"status": "ok"}
 
 
 @router.get("/config", dependencies=[Depends(require_auth)])
 async def get_config():
+    from backend.core.branding import VERSION
     from backend.main import config
     return {
         "server": {"host": config.server.host, "port": config.server.port},
         "ipmi": {"poll_interval": config.ipmi.poll_interval},
         "data": {"retention_days": config.data.retention_days},
         "demo": config.demo,
+        "version": VERSION,
     }
 
 
