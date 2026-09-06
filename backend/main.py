@@ -1075,8 +1075,14 @@ def _reset_password():
         username = input("Username: ")
         password = getpass.getpass("New password: ")
         if await am.has_user():
-            await am.update_password(username, password)
-            print(f"Password updated for {username}")
+            # F17: update_password reports whether a row actually changed. A
+            # mistyped username matches zero rows, and printing success there
+            # tells an operator mid-incident that a password changed when it
+            # did not.
+            if await am.update_password(username, password):
+                print(f"Password updated for {username}")
+            else:
+                print(f"No user named {username} exists — nothing was updated.")
         else:
             await am.create_user(username, password)
             print(f"User {username} created")

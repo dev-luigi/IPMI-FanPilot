@@ -340,13 +340,23 @@ class AuthManager:
             return False
         return bcrypt.checkpw(password.encode(), row["password_hash"].encode())
 
-    async def update_password(self, username: str, new_password: str) -> None:
+    async def update_password(self, username: str, new_password: str) -> bool:
+        """Set a new password. Returns True iff a row was actually updated.
+
+        F17: the UPDATE silently matches zero rows for a username that does not
+        exist, and the caller used to print "Password updated" regardless — an
+        operator recovering from an incident was told a password had changed
+        when it had not. The rowcount is returned rather than raised so callers
+        stay simple and decide their own reporting.
+        """
         pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
-        await self.db.execute(
+        cursor = await self.db.execute(
             "UPDATE users SET password_hash = ? WHERE username = ?",
             (pw_hash, username),
         )
+        changed = bool(getattr(cursor, "rowcount", 0))
         await self.db.commit()
+        return changed
 
     async def replace_user(self, username: str, password: str) -> None:
         """Single-user create-or-replace: clear the users table and insert one row.
