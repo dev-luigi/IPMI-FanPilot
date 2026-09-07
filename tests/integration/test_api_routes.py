@@ -139,7 +139,7 @@ def test_login_failure_localized(client_auth):
         json={"username": "admin", "password": "wrong"},
         headers={"Accept-Language": "it"},
     )
-    assert it_resp.status_code == 200
+    assert it_resp.status_code == 401
     it_body = it_resp.json()
     assert it_body["success"] is False
     assert it_body["error"] == t("invalid_credentials", "it")
@@ -151,7 +151,7 @@ def test_login_failure_localized(client_auth):
         json={"username": "admin", "password": "wrong"},
         headers={"Accept-Language": "en"},
     )
-    assert en_resp.status_code == 200
+    assert en_resp.status_code == 401
     en_body = en_resp.json()
     assert en_body["success"] is False
     assert en_body["error"] == t("invalid_credentials", "en")
@@ -159,6 +159,32 @@ def test_login_failure_localized(client_auth):
 
     # Resolver actually switched languages between the two requests.
     assert it_body["error"] != en_body["error"]
+
+
+def test_login_correct_password_accepted_after_failed_attempts(client_auth):
+    """A valid credential still works once the failure counter is past the threshold.
+
+    The failure counter is keyed on a caller-supplied username, so anyone able to
+    reach the login form could otherwise burn attempts on a guessed name and have
+    the real operator's correct password refused for the whole lockout window.
+    """
+    setup_resp = client_auth.post(
+        "/api/auth/setup", json={"username": "admin", "password": "correcthorse"}
+    )
+    assert setup_resp.status_code == 200
+
+    for _ in range(6):
+        bad = client_auth.post(
+            "/api/auth/login", json={"username": "admin", "password": "wrong"}
+        )
+        assert bad.status_code == 401
+        assert bad.json()["success"] is False
+
+    good = client_auth.post(
+        "/api/auth/login", json={"username": "admin", "password": "correcthorse"}
+    )
+    assert good.status_code == 200, good.text
+    assert good.json()["success"] is True
 
 
 # --- quick-260625-rw5: host-field validation on create + update -----------------------------
