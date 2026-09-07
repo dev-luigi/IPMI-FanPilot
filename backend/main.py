@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.core.auth import AuthManager, require_auth
 from backend.core.branding import APP_NAME, VERSION, credits_line, render_banner_safe
+from backend.core.certs import resolve_tls_files
 from backend.core.config import (
     AppConfig,
     load_config,
@@ -327,7 +328,15 @@ async def lifespan(app: FastAPI):
     # (e.g. from a test harness) without going through cli().
     effective_host = getattr(app.state, "effective_host", None) or config.server.host
     effective_port = getattr(app.state, "effective_port", None) or config.server.port
-    logger.info("%s started on %s:%d", APP_NAME, effective_host, effective_port)
+    # State the scheme: a container operator has no console to read, and "did TLS actually
+    # come up?" is otherwise unanswerable from the log alone.
+    logger.info(
+        "%s started on %s://%s:%d",
+        APP_NAME,
+        "https" if config.server.https else "http",
+        effective_host,
+        effective_port,
+    )
     if config.demo:
         logger.info("Demo mode active — 6 virtual servers (one per vendor) with simulated data")
 
@@ -658,9 +667,9 @@ def cli():
         return
 
     if args.gen_cert:
-        # 04-W4-03: generate a self-signed pair under data/certs/, persist the paths to
-        # config.yaml's server section, then exit. The operator flips server.https=true
-        # (here in config.yaml or via the Settings Network card) and restarts.
+        # Generate a pair under data/certs/, persist the paths, then exit. Serving over
+        # TLS also generates on demand, so this is only for operators who want the file
+        # to exist (to import into a trust store) before flipping the setting.
         from backend.core.certs import generate_self_signed
         cfg = load_config()
         cert_dir = Path(cfg.data.db_path).parent / "certs"
@@ -670,6 +679,8 @@ def cli():
         print(f"Generated: {key_path}")
         print("Wrote cert_file/key_file to config.yaml. Set server.https=true and restart "
               "to serve over HTTPS.")
+        print("Browsers will warn that the issuer is unknown until you import the "
+              "certificate into the system or browser trust store.")
         return
 
     # === FIX-02 gap closure: load config BEFORE uvicorn.run() ===
@@ -723,16 +734,16 @@ def cli():
         uvicorn_kwargs = dict(
             host=effective_host, port=effective_port, reload=True, log_level="info"
         )
-        if early_cfg is not None and early_cfg.server.https:
-            if not early_cfg.server.cert_file or not early_cfg.server.key_file:
+        if early_cfg is not None:
+            tls = resolve_tls_files(early_cfg)
+            if tls is not None:
+                uvicorn_kwargs["ssl_certfile"], uvicorn_kwargs["ssl_keyfile"] = tls
+            elif early_cfg.server.https:
                 print(
-                    "WARNING: server.https=true but cert_file/key_file are not set in config.yaml; "
-                    "run `ipmideck --gen-cert` first. Starting over plain HTTP.",
+                    "WARNING: https is enabled but no certificate could be set up. "
+                    "Starting over plain HTTP.",
                     file=sys.stderr,
                 )
-            else:
-                uvicorn_kwargs["ssl_certfile"] = early_cfg.server.cert_file
-                uvicorn_kwargs["ssl_keyfile"] = early_cfg.server.key_file
         uvicorn.run("backend.main:app", **uvicorn_kwargs)
         return
 
@@ -907,6 +918,11 @@ def cli():
 
         console = None
         render_thread = None
+        # Held in a one-element list so the serve loop below can update it: the URL shown by
+        # the console is rebuilt on every render, and after a restart with TLS newly enabled
+        # a scheme captured once would keep advertising http:// for a server that is no
+        # longer reachable that way.
+        scheme_box = ["https" if (early_cfg is not None and early_cfg.server.https) else "http"]
         if interactive:
             # D-24/D-07: only on a real TTY. The big ANSI Shadow banner is now PINNED PERMANENTLY
             # in the rich console header (04.1-04 gap-closure r3 — user override of D-02 "poi
@@ -917,7 +933,6 @@ def cli():
             app.state.host_splash_shown = True
 
             cur_level = (early_cfg.logging.level.upper() if early_cfg is not None else "INFO")
-            scheme = "https" if (early_cfg is not None and early_cfg.server.https) else "http"
 
             # D-04/D-11 (04.1-04 gap-closure r4): ACTUALLY apply the initial verbosity on the
             # interactive path BEFORE the render thread starts. lifespan() does _setup_logging +
@@ -935,7 +950,7 @@ def cli():
                 ws_manager=ws_manager,
                 # D-15a: map a wildcard bind (0.0.0.0/::/"") to a browsable 127.0.0.1 so 'u'
                 # surfaces a URL the operator can actually open (not http://0.0.0.0:port).
-                get_url=lambda: browsable_url(scheme, effective_host, effective_port),
+                get_url=lambda: browsable_url(scheme_box[0], effective_host, effective_port),
                 get_servers=lambda: list(servers_cache),  # D-15b — cached snapshot (async-safe)
                 on_exit=lambda: loop.call_soon_threadsafe(_request_exit),  # D-12
                 on_restart=lambda: loop.call_soon_threadsafe(_request_restart),  # D-15c
@@ -991,9 +1006,10 @@ def cli():
                 app.state.effective_port = iter_port
 
                 cfg_kwargs: dict = {}
-                if iter_cfg.server.https and iter_cfg.server.cert_file and iter_cfg.server.key_file:
-                    cfg_kwargs["ssl_certfile"] = iter_cfg.server.cert_file
-                    cfg_kwargs["ssl_keyfile"] = iter_cfg.server.key_file
+                tls = resolve_tls_files(iter_cfg)
+                if tls is not None:
+                    cfg_kwargs["ssl_certfile"], cfg_kwargs["ssl_keyfile"] = tls
+                scheme_box[0] = "https" if tls is not None else "http"
 
                 uconfig = uvicorn.Config(
                     "backend.main:app",
