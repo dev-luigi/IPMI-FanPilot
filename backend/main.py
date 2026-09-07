@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from typing import Annotated
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import Cookie, Depends, FastAPI, WebSocket, WebSocketDisconnect, status
@@ -360,39 +361,90 @@ app = FastAPI(
 
 # === WebSocket endpoint ===
 
+# How often an open connection re-checks that its session is still good. This is the
+# eviction latency being bought: after a password change or an expiry, a socket opened
+# earlier keeps receiving telemetry for at most this long. One row read per connection per
+# interval, on a single-user LAN dashboard.
+_WS_REVALIDATE_SECONDS = 60
+
+
+def _ws_origin_allowed(websocket: WebSocket) -> bool:
+    """True if this handshake did not come from another site.
+
+    A WebSocket handshake is not subject to the same-origin policy: any page the operator
+    visits can open a socket to this app and it will carry their cookie. Comparing the
+    stated origin against the Host the request was addressed to needs no configuration and
+    survives being reached by address, hostname or any port — which a fixed allow-list
+    would not, on a box the operator reaches half a dozen different ways.
+
+    A missing Origin is allowed: command-line clients and health checks send none, and
+    browsers always send one for a cross-origin handshake, so "present and pointing
+    elsewhere" is the signal worth acting on.
+    """
+    origin = websocket.headers.get("origin")
+    if not origin:
+        return True
+    host_header = websocket.headers.get("host")
+    if not host_header:
+        return False
+    return urlsplit(origin).netloc.lower() == host_header.lower()
+
+
+async def _ws_session_valid(session: str | None) -> bool:
+    """Whether a session cookie still authorises a connection, right now.
+
+    Both conditions that end a session are covered by this one call: the token carries its
+    own expiry, and it is bound to a fingerprint of the stored password hash, so a password
+    change invalidates it too.
+    """
+    if not await auth.is_auth_enabled():
+        return True
+    username = await auth.verify_session_token_async(session) if session else None
+    if not username:
+        return False
+    # A token signed for an account that has since been replaced must not stay valid,
+    # same check the HTTP guard makes.
+    return await db.fetchone(
+        "SELECT 1 FROM users WHERE username = ? LIMIT 1", (username,)
+    ) is not None
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
     session: Annotated[str | None, Cookie()] = None,
 ):
-    # 04-W4-01 auth gate: when auth is ENABLED, a valid session cookie is required
-    # BEFORE the handshake is accepted. When auth is DISABLED (open-access mode, or
-    # no user configured), the connection is allowed exactly as before — this mirrors
-    # require_auth's is_auth_enabled() gate so single-user no-auth setups are never
-    # locked out. Uses the current module globals (auth, db, ws_manager) — there is
-    # NO app-state container exists (Decision A1 — Codex HIGH fix).
-    if await auth.is_auth_enabled():
-        username = await auth.verify_session_token_async(session) if session else None
-        if not username:
-            # Reject pre-accept with policy-violation close code (1008).
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-        # Phase 02.1 REVIEWS #7 invariant: a token signed for an OLD username (pre
-        # credential-replace) must not stay valid — confirm the token subject is the
-        # CURRENT single stored user, same check as require_auth.
-        row = await db.fetchone(
-            "SELECT 1 FROM users WHERE username = ? LIMIT 1", (username,)
-        )
-        if row is None:
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-    # Authenticated (or auth disabled) → accept + replay snapshot. The early-return
-    # above is added BEFORE connect(), so the snapshot-replay ordering is unchanged.
+    # Origin first, before the auth gate: it has to apply in open-access mode too, which
+    # is exactly when a socket opened by another site costs the most.
+    if not _ws_origin_allowed(websocket):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    if not await _ws_session_valid(session):
+        # Closing before accept() makes this a rejected handshake, not a dropped socket.
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await ws_manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            try:
+                await asyncio.wait_for(
+                    websocket.receive_text(), timeout=_WS_REVALIDATE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                # Nothing arrived, which is the normal case — the client never sends. The
+                # timeout is only here to give the check below somewhere to happen.
+                pass
+            # Authorising once at the handshake would let a connection outlive the session
+            # that opened it indefinitely, since a socket can stay open for days.
+            if not await _ws_session_valid(session):
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                break
     except WebSocketDisconnect:
+        pass
+    finally:
+        # Also covers the policy close above, which would otherwise leave the connection
+        # in the manager's list until a broadcast happened to fail on it.
         ws_manager.disconnect(websocket)
 
 
