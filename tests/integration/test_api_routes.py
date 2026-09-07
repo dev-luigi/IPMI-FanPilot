@@ -394,6 +394,31 @@ def test_create_server_rejects_non_ipmi_port(client):
     assert "192.0.2.43" not in hosts
 
 
+def test_history_csv_rejects_unknown_range(client):
+    """An unrecognised range is a 422 rather than a silent fallback to 24 hours.
+
+    The value was previously reflected into the download filename while the data
+    came from a different window, so the file's name disagreed with its contents.
+    """
+    resp = client.get(
+        "/api/system/history-csv",
+        params={"server_id": "s1", "sensor_name": "CPU Temp", "range": 'BOGUS"'},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_history_csv_filename_cannot_break_the_header(client):
+    """A quote in the sensor name cannot escape the quoted filename."""
+    resp = client.get(
+        "/api/system/history-csv",
+        params={"server_id": "s1", "sensor_name": 'evil";x=y'},
+    )
+    assert resp.status_code == 200, resp.text
+    disposition = resp.headers["content-disposition"]
+    assert disposition.count('"') == 2, disposition
+    assert ";x=y" not in disposition
+
+
 # --- 08-01 (D-12): strict vendor enum -> automatic 422 at the parse layer -------------------
 
 

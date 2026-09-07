@@ -8,12 +8,14 @@ import shutil
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.core.auth import require_auth
+from backend.core.csv_export import csv_safe, safe_filename_part
 
 router = APIRouter()
 
@@ -439,12 +441,20 @@ _RANGE_OFFSETS = {
 
 
 @router.get("/system/history-csv", dependencies=[Depends(require_auth)])
-async def history_csv(server_id: str, sensor_name: str, range: str = "24h"):
-    """Export sensor history as CSV. server_id is str (Decision C); range matches
-    useRangeStore ("live" | "1h" | "24h" | "7d")."""
+async def history_csv(
+    server_id: str,
+    sensor_name: str,
+    range: Literal["live", "1h", "24h", "7d"] = "24h",
+):
+    """Export sensor history as CSV.
+
+    `range` is a closed set: an unrecognised value used to fall back to 24 hours while
+    still being reflected verbatim into the response filename, so the caller was handed a
+    file whose name disagreed with its contents.
+    """
     from backend.main import db
 
-    offset = _RANGE_OFFSETS.get(range, _RANGE_OFFSETS["24h"])
+    offset = _RANGE_OFFSETS[range]
     rows = await db.fetchall(
         "SELECT timestamp, sensor_name, value FROM sensor_readings "
         "WHERE server_id = ? AND sensor_name = ? AND timestamp > datetime('now', ?) "
@@ -455,8 +465,10 @@ async def history_csv(server_id: str, sensor_name: str, range: str = "24h"):
     writer = csv.writer(buf)
     writer.writerow(["timestamp", "sensor_name", "value"])
     for r in rows:
-        writer.writerow([r["timestamp"], r["sensor_name"], r["value"]])
-    safe = sensor_name.replace(" ", "_").replace("/", "_")
+        writer.writerow(
+            [csv_safe(r["timestamp"]), csv_safe(r["sensor_name"]), csv_safe(r["value"])]
+        )
+    safe = safe_filename_part(sensor_name)
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv",
