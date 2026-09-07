@@ -97,6 +97,13 @@ docker compose -f docker-compose.dev.yml up --build   # build from source
 
 Open `http://<your-ip>:3000` and follow the setup wizard.
 
+> The container runs as an unprivileged user (uid/gid 1000), not root. A named volume or an
+> existing data directory created by an earlier version is adopted automatically on first
+> start — no manual `chown`. The only case needing a one-time host-side
+> `chown -R 1000:1000 <dir>` is a bind mount on a filesystem that refuses to change ownership
+> (a read-only mount, NFS without `no_root_squash`, or CIFS with a fixed uid/gid). The
+> container still starts in that case and logs a warning rather than failing.
+
 > `--network host` (Linux) lets the container reach BMCs on your local network via UDP 623.
 > On Windows/macOS use `-p 3000:3000`.
 
