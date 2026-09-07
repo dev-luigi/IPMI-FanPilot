@@ -334,6 +334,66 @@ def test_update_server_without_host_succeeds(client):
     assert match[0]["host"] == "192.0.2.42"
 
 
+def test_create_server_rejects_option_like_host(client):
+    """A host that ipmitool would read as a flag is refused and never stored.
+
+    "-C0" lands in the argument vector as the cipher-suite flag and suite 0 turns
+    authentication off entirely, so this string must not survive to the poll loop.
+    """
+    for bad_host in ["-C0", "--", ".", "..", "$(id)", "host;ls", "a" * 300]:
+        resp = client.post(
+            "/api/servers",
+            json={
+                "name": "Bad host",
+                "host": bad_host,
+                "username": "root",
+                "password": "calvin",
+                "vendor": "dell",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["success"] is False, f"{bad_host!r} was accepted"
+        assert body["error"] == t("invalid_host", "en")
+
+    hosts = [s["host"] for s in client.get("/api/servers").json()["servers"]]
+    assert "-C0" not in hosts
+
+
+def test_test_endpoint_rejects_option_like_host(client):
+    """The credential-test endpoint validates the host it hands to ipmitool."""
+    resp = client.post(
+        "/api/servers/test",
+        json={"host": "-C0", "username": "root", "password": "calvin"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"] == t("invalid_host", "en")
+
+
+def test_create_server_rejects_non_ipmi_port(client):
+    """A port other than 623 is refused rather than stored and silently ignored."""
+    resp = client.post(
+        "/api/servers",
+        json={
+            "name": "Odd port",
+            "host": "192.0.2.43",
+            "port": 6230,
+            "username": "root",
+            "password": "calvin",
+            "vendor": "dell",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"] == t("unsupported_port", "en")
+
+    hosts = [s["host"] for s in client.get("/api/servers").json()["servers"]]
+    assert "192.0.2.43" not in hosts
+
+
 # --- 08-01 (D-12): strict vendor enum -> automatic 422 at the parse layer -------------------
 
 
