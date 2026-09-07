@@ -95,6 +95,11 @@ def _apply_env_overrides(config: AppConfig) -> None:
     env_map = {
         "IPMIDECK_SERVER_HOST": ("server", "host"),
         "IPMIDECK_SERVER_PORT": ("server", "port", int),
+        "IPMIDECK_SERVER_HTTPS": (
+            "server", "https", lambda v: v.lower() in ("true", "1", "yes")
+        ),
+        "IPMIDECK_SERVER_CERT_FILE": ("server", "cert_file"),
+        "IPMIDECK_SERVER_KEY_FILE": ("server", "key_file"),
         "IPMIDECK_AUTH_ENABLED": ("auth", "enabled", lambda v: v.lower() in ("true", "1", "yes")),
         "IPMIDECK_AUTH_SESSION_EXPIRY": ("auth", "session_expiry"),
         "IPMIDECK_IPMI_POLL_INTERVAL": ("ipmi", "poll_interval", int),

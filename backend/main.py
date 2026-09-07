@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from typing import Annotated
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import Cookie, Depends, FastAPI, WebSocket, WebSocketDisconnect, status
@@ -21,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.core.auth import AuthManager, require_auth
 from backend.core.branding import APP_NAME, VERSION, credits_line, render_banner_safe
+from backend.core.certs import resolve_tls_files
 from backend.core.config import (
     AppConfig,
     load_config,
@@ -258,6 +260,17 @@ async def lifespan(app: FastAPI):
     # Only consulted when auth is enabled — no change to the is_auth_enabled() gating.
     auth.session_expiry_seconds = parse_duration_seconds(config.auth.session_expiry)
 
+    # Convert any credential still stored in the older unauthenticated format. Must run
+    # after the encryption key is loaded and before anything reads a credential — the
+    # demo seed below writes rows, and the module background tasks started later read
+    # them. Never fatal: both formats stay readable, so an install that fails to convert
+    # keeps working exactly as before rather than losing fan control at startup.
+    try:
+        from backend.core.crypto import migrate_credentials
+        await migrate_credentials(db, auth.get_encryption_key(), data_dir)
+    except Exception:
+        logger.exception("Could not convert stored credentials to the current format")
+
     # 08-04 (D-16): in demo mode, seed one synthetic server per canonical vendor so the
     # per-vendor journeys (tier badges, monitoring-only warnings, loop-skip, argv routing)
     # are visible + Playwright-testable WITHOUT hardware. Runs AFTER auth.initialize() so the
@@ -316,7 +329,15 @@ async def lifespan(app: FastAPI):
     # (e.g. from a test harness) without going through cli().
     effective_host = getattr(app.state, "effective_host", None) or config.server.host
     effective_port = getattr(app.state, "effective_port", None) or config.server.port
-    logger.info("%s started on %s:%d", APP_NAME, effective_host, effective_port)
+    # State the scheme: a container operator has no console to read, and "did TLS actually
+    # come up?" is otherwise unanswerable from the log alone.
+    logger.info(
+        "%s started on %s://%s:%d",
+        APP_NAME,
+        "https" if config.server.https else "http",
+        effective_host,
+        effective_port,
+    )
     if config.demo:
         logger.info("Demo mode active — 6 virtual servers (one per vendor) with simulated data")
 
@@ -340,39 +361,90 @@ app = FastAPI(
 
 # === WebSocket endpoint ===
 
+# How often an open connection re-checks that its session is still good. This is the
+# eviction latency being bought: after a password change or an expiry, a socket opened
+# earlier keeps receiving telemetry for at most this long. One row read per connection per
+# interval, on a single-user LAN dashboard.
+_WS_REVALIDATE_SECONDS = 60
+
+
+def _ws_origin_allowed(websocket: WebSocket) -> bool:
+    """True if this handshake did not come from another site.
+
+    A WebSocket handshake is not subject to the same-origin policy: any page the operator
+    visits can open a socket to this app and it will carry their cookie. Comparing the
+    stated origin against the Host the request was addressed to needs no configuration and
+    survives being reached by address, hostname or any port — which a fixed allow-list
+    would not, on a box the operator reaches half a dozen different ways.
+
+    A missing Origin is allowed: command-line clients and health checks send none, and
+    browsers always send one for a cross-origin handshake, so "present and pointing
+    elsewhere" is the signal worth acting on.
+    """
+    origin = websocket.headers.get("origin")
+    if not origin:
+        return True
+    host_header = websocket.headers.get("host")
+    if not host_header:
+        return False
+    return urlsplit(origin).netloc.lower() == host_header.lower()
+
+
+async def _ws_session_valid(session: str | None) -> bool:
+    """Whether a session cookie still authorises a connection, right now.
+
+    Both conditions that end a session are covered by this one call: the token carries its
+    own expiry, and it is bound to a fingerprint of the stored password hash, so a password
+    change invalidates it too.
+    """
+    if not await auth.is_auth_enabled():
+        return True
+    username = await auth.verify_session_token_async(session) if session else None
+    if not username:
+        return False
+    # A token signed for an account that has since been replaced must not stay valid,
+    # same check the HTTP guard makes.
+    return await db.fetchone(
+        "SELECT 1 FROM users WHERE username = ? LIMIT 1", (username,)
+    ) is not None
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
     session: Annotated[str | None, Cookie()] = None,
 ):
-    # 04-W4-01 auth gate: when auth is ENABLED, a valid session cookie is required
-    # BEFORE the handshake is accepted. When auth is DISABLED (open-access mode, or
-    # no user configured), the connection is allowed exactly as before — this mirrors
-    # require_auth's is_auth_enabled() gate so single-user no-auth setups are never
-    # locked out. Uses the current module globals (auth, db, ws_manager) — there is
-    # NO app-state container exists (Decision A1 — Codex HIGH fix).
-    if await auth.is_auth_enabled():
-        username = await auth.verify_session_token_async(session) if session else None
-        if not username:
-            # Reject pre-accept with policy-violation close code (1008).
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-        # Phase 02.1 REVIEWS #7 invariant: a token signed for an OLD username (pre
-        # credential-replace) must not stay valid — confirm the token subject is the
-        # CURRENT single stored user, same check as require_auth.
-        row = await db.fetchone(
-            "SELECT 1 FROM users WHERE username = ? LIMIT 1", (username,)
-        )
-        if row is None:
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-    # Authenticated (or auth disabled) → accept + replay snapshot. The early-return
-    # above is added BEFORE connect(), so the snapshot-replay ordering is unchanged.
+    # Origin first, before the auth gate: it has to apply in open-access mode too, which
+    # is exactly when a socket opened by another site costs the most.
+    if not _ws_origin_allowed(websocket):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    if not await _ws_session_valid(session):
+        # Closing before accept() makes this a rejected handshake, not a dropped socket.
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await ws_manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            try:
+                await asyncio.wait_for(
+                    websocket.receive_text(), timeout=_WS_REVALIDATE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                # Nothing arrived, which is the normal case — the client never sends. The
+                # timeout is only here to give the check below somewhere to happen.
+                pass
+            # Authorising once at the handshake would let a connection outlive the session
+            # that opened it indefinitely, since a socket can stay open for days.
+            if not await _ws_session_valid(session):
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                break
     except WebSocketDisconnect:
+        pass
+    finally:
+        # Also covers the policy close above, which would otherwise leave the connection
+        # in the manager's list until a broadcast happened to fail on it.
         ws_manager.disconnect(websocket)
 
 
@@ -647,9 +719,9 @@ def cli():
         return
 
     if args.gen_cert:
-        # 04-W4-03: generate a self-signed pair under data/certs/, persist the paths to
-        # config.yaml's server section, then exit. The operator flips server.https=true
-        # (here in config.yaml or via the Settings Network card) and restarts.
+        # Generate a pair under data/certs/, persist the paths, then exit. Serving over
+        # TLS also generates on demand, so this is only for operators who want the file
+        # to exist (to import into a trust store) before flipping the setting.
         from backend.core.certs import generate_self_signed
         cfg = load_config()
         cert_dir = Path(cfg.data.db_path).parent / "certs"
@@ -659,6 +731,8 @@ def cli():
         print(f"Generated: {key_path}")
         print("Wrote cert_file/key_file to config.yaml. Set server.https=true and restart "
               "to serve over HTTPS.")
+        print("Browsers will warn that the issuer is unknown until you import the "
+              "certificate into the system or browser trust store.")
         return
 
     # === FIX-02 gap closure: load config BEFORE uvicorn.run() ===
@@ -712,16 +786,16 @@ def cli():
         uvicorn_kwargs = dict(
             host=effective_host, port=effective_port, reload=True, log_level="info"
         )
-        if early_cfg is not None and early_cfg.server.https:
-            if not early_cfg.server.cert_file or not early_cfg.server.key_file:
+        if early_cfg is not None:
+            tls = resolve_tls_files(early_cfg)
+            if tls is not None:
+                uvicorn_kwargs["ssl_certfile"], uvicorn_kwargs["ssl_keyfile"] = tls
+            elif early_cfg.server.https:
                 print(
-                    "WARNING: server.https=true but cert_file/key_file are not set in config.yaml; "
-                    "run `ipmideck --gen-cert` first. Starting over plain HTTP.",
+                    "WARNING: https is enabled but no certificate could be set up. "
+                    "Starting over plain HTTP.",
                     file=sys.stderr,
                 )
-            else:
-                uvicorn_kwargs["ssl_certfile"] = early_cfg.server.cert_file
-                uvicorn_kwargs["ssl_keyfile"] = early_cfg.server.key_file
         uvicorn.run("backend.main:app", **uvicorn_kwargs)
         return
 
@@ -896,6 +970,11 @@ def cli():
 
         console = None
         render_thread = None
+        # Held in a one-element list so the serve loop below can update it: the URL shown by
+        # the console is rebuilt on every render, and after a restart with TLS newly enabled
+        # a scheme captured once would keep advertising http:// for a server that is no
+        # longer reachable that way.
+        scheme_box = ["https" if (early_cfg is not None and early_cfg.server.https) else "http"]
         if interactive:
             # D-24/D-07: only on a real TTY. The big ANSI Shadow banner is now PINNED PERMANENTLY
             # in the rich console header (04.1-04 gap-closure r3 — user override of D-02 "poi
@@ -906,7 +985,6 @@ def cli():
             app.state.host_splash_shown = True
 
             cur_level = (early_cfg.logging.level.upper() if early_cfg is not None else "INFO")
-            scheme = "https" if (early_cfg is not None and early_cfg.server.https) else "http"
 
             # D-04/D-11 (04.1-04 gap-closure r4): ACTUALLY apply the initial verbosity on the
             # interactive path BEFORE the render thread starts. lifespan() does _setup_logging +
@@ -924,7 +1002,7 @@ def cli():
                 ws_manager=ws_manager,
                 # D-15a: map a wildcard bind (0.0.0.0/::/"") to a browsable 127.0.0.1 so 'u'
                 # surfaces a URL the operator can actually open (not http://0.0.0.0:port).
-                get_url=lambda: browsable_url(scheme, effective_host, effective_port),
+                get_url=lambda: browsable_url(scheme_box[0], effective_host, effective_port),
                 get_servers=lambda: list(servers_cache),  # D-15b — cached snapshot (async-safe)
                 on_exit=lambda: loop.call_soon_threadsafe(_request_exit),  # D-12
                 on_restart=lambda: loop.call_soon_threadsafe(_request_restart),  # D-15c
@@ -980,9 +1058,10 @@ def cli():
                 app.state.effective_port = iter_port
 
                 cfg_kwargs: dict = {}
-                if iter_cfg.server.https and iter_cfg.server.cert_file and iter_cfg.server.key_file:
-                    cfg_kwargs["ssl_certfile"] = iter_cfg.server.cert_file
-                    cfg_kwargs["ssl_keyfile"] = iter_cfg.server.key_file
+                tls = resolve_tls_files(iter_cfg)
+                if tls is not None:
+                    cfg_kwargs["ssl_certfile"], cfg_kwargs["ssl_keyfile"] = tls
+                scheme_box[0] = "https" if tls is not None else "http"
 
                 uconfig = uvicorn.Config(
                     "backend.main:app",

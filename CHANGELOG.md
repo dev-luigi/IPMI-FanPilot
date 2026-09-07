@@ -50,6 +50,24 @@ into a new dated `## [<version>] - YYYY-MM-DD` section.
 - **`reset-password` no longer reports success for a username that does not exist (F17).**
 - **Backup archives are credential-grade.** An archive bundles the encryption key, the database
   and the configuration together, so it must be stored as carefully as the credentials themselves.
+- **Stored BMC credentials now use authenticated encryption (AES-256-GCM).** The previous
+  format concealed the value but did not detect modification, so anyone who could write to the
+  database could alter a stored credential undetectably. Stored values now carry a version
+  marker, and **the first start after upgrading converts existing credentials automatically** —
+  no action required, nothing is re-entered.
+
+  Before it changes anything the conversion copies `ipmideck.db` and `encryption.key` next to
+  themselves as `*.pre-authenc-<timestamp>.bak`. **Those copies are credential-grade** — they
+  contain your BMC passwords and the key that decrypts them. Keep them until you are satisfied
+  the upgrade went well, then delete them. They are never included in a backup archive.
+
+  Downgrading afterwards is possible: stop the app, move the two `.bak` files back over the
+  live names, install the older version. If you are not downgrading you do not need them —
+  the new version reads both formats, so an unconverted database keeps working.
+- **A credential that cannot be decrypted no longer answers differently from a BMC that is
+  simply unreachable.** The connection-test and fan-mode endpoints used to fail with a server
+  error in the first case and an ordinary failure in the second, which distinguished the two
+  for anyone probing.
 
 
 ## [2.0.1] - 2026-07-25
