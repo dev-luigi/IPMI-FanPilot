@@ -270,9 +270,12 @@ ipmideck/
 - Opaque session tokens, HMAC-SHA256 signed with a per-install secret, with configurable
   expiry (`IPMIDECK_AUTH_SESSION_EXPIRY` / the `auth.session_expiry` config key — e.g. `24h`,
   `90m`, `1h`; default `24h`)
-- BMC credentials encrypted at rest with AES-256-CBC. The 32-byte key is randomly generated and
-  stored in `<data_dir>/encryption.key` — deliberately **outside** the database, so a stolen DB
-  alone decrypts nothing (back the key file up separately)
+- BMC credentials encrypted at rest with AES-256-GCM, which detects tampering as well as
+  concealing the value. The 32-byte key is randomly generated and stored in
+  `<data_dir>/encryption.key` — deliberately **outside** the database, so a stolen DB
+  alone decrypts nothing (back the key file up separately). Credentials written by earlier
+  versions (AES-256-CBC, unauthenticated) are converted automatically on the first start
+  after upgrading; see the changelog for the copies it leaves behind
 - BMC passwords are never placed on the command line — `ipmitool` reads them from the environment
   (`-E` / `IPMITOOL_PASSWORD`), so they never appear in `ps`
 - No external network dependencies — fully offline capable

@@ -68,10 +68,10 @@ async def power_command(server_id: str, body: PowerAction, lang: str = Depends(g
 
     key = auth.get_encryption_key()
     host = server["host"]
-    user = decrypt(server["username_enc"], key)
-    pwd = decrypt(server["password_enc"], key)
 
     try:
+        user = decrypt(server["username_enc"], key)
+        pwd = decrypt(server["password_enc"], key)
         result = await ctx.ipmi.power_command(host, user, pwd, body.action)
 
         # Log command

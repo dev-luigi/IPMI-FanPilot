@@ -244,10 +244,14 @@ async def test_connection(server_id: str, lang: str = Depends(get_lang)):
 
     key = auth.get_encryption_key()
     host = server["host"]
-    user = decrypt(server["username_enc"], key)
-    pwd = decrypt(server["password_enc"], key)
 
     try:
+        # Decrypting inside the guard matters: a credential that cannot be decrypted
+        # used to escape as an unhandled error and a 500, while a working credential
+        # against an unreachable BMC returned 200. That difference told an observer
+        # which of the two had happened.
+        user = decrypt(server["username_enc"], key)
+        pwd = decrypt(server["password_enc"], key)
         status = await ipmi_service.get_power_status(host, user, pwd)
         await db.execute(
             "UPDATE servers SET is_online = 1, last_seen = CURRENT_TIMESTAMP WHERE id = ?",

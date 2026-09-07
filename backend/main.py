@@ -258,6 +258,17 @@ async def lifespan(app: FastAPI):
     # Only consulted when auth is enabled — no change to the is_auth_enabled() gating.
     auth.session_expiry_seconds = parse_duration_seconds(config.auth.session_expiry)
 
+    # Convert any credential still stored in the older unauthenticated format. Must run
+    # after the encryption key is loaded and before anything reads a credential — the
+    # demo seed below writes rows, and the module background tasks started later read
+    # them. Never fatal: both formats stay readable, so an install that fails to convert
+    # keeps working exactly as before rather than losing fan control at startup.
+    try:
+        from backend.core.crypto import migrate_credentials
+        await migrate_credentials(db, auth.get_encryption_key(), data_dir)
+    except Exception:
+        logger.exception("Could not convert stored credentials to the current format")
+
     # 08-04 (D-16): in demo mode, seed one synthetic server per canonical vendor so the
     # per-vendor journeys (tier badges, monitoring-only warnings, loop-skip, argv routing)
     # are visible + Playwright-testable WITHOUT hardware. Runs AFTER auth.initialize() so the
