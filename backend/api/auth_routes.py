@@ -163,7 +163,10 @@ async def setup(body: SetupRequest, request: Request, response: Response, lang: 
     from backend.main import auth
     if await auth.has_user():
         return {"success": False, "error": t("user_already_exists", lang)}
-    await auth.create_user(body.username, body.password)
+    try:
+        await auth.create_user(body.username, body.password)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
     await auth.set_auth_enabled(True)
     token = await auth.create_session_token_async(body.username)
     _set_session_cookie(response, request, token, auth.session_expiry_seconds)

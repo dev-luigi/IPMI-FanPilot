@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -12,20 +13,44 @@ import yaml
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _DURATION_RE = re.compile(r"^(\d+)([smhd]?)$")
 
+# Upper bound for any configured duration. A session lifetime of "9999d" is a typo, not an
+# intention, and silently honouring it would leave a session valid for centuries. Well above
+# any legitimate setting, so a real configuration is never clamped.
+MAX_DURATION_SECONDS = 30 * 86400
+
+logger = logging.getLogger("ipmideck.config")
+
 
 def parse_duration_seconds(value: str | int | None, default: int = 86400) -> int:
     """Parse a duration like '24h', '90m', '1d', '45s', or a bare integer (seconds) into
-    seconds. Invalid / non-positive input returns ``default`` (never raises)."""
+    seconds.
+
+    Never raises: this runs during startup, where a malformed value in the configuration
+    file must not stop the application from booting. Invalid or non-positive input falls
+    back to ``default``, but the fallback is LOGGED — silently substituting a different
+    lifetime than the one written in the file left the operator with no way to discover
+    that their setting was never in effect. Values above the maximum are clamped rather
+    than rejected, so an obvious typo cannot grant a session an unbounded lifetime.
+    """
     if value is None or isinstance(value, bool):
         # bool is an int subclass — reject it explicitly so True/False can't slip through.
+        if value is not None:
+            logger.warning("Invalid duration %r — using %ds instead", value, default)
         return default
     if isinstance(value, int):
-        return value if value > 0 else default
+        if value <= 0:
+            logger.warning("Invalid duration %r — using %ds instead", value, default)
+            return default
+        return min(value, MAX_DURATION_SECONDS)
     match = _DURATION_RE.match(value.strip().lower())
     if not match:
+        logger.warning("Invalid duration %r — using %ds instead", value, default)
         return default
     seconds = int(match.group(1)) * _DURATION_UNITS[match.group(2) or "s"]
-    return seconds if seconds > 0 else default
+    if seconds <= 0:
+        logger.warning("Invalid duration %r — using %ds instead", value, default)
+        return default
+    return min(seconds, MAX_DURATION_SECONDS)
 
 
 def _data_dir() -> Path:

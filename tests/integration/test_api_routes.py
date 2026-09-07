@@ -419,6 +419,40 @@ def test_history_csv_filename_cannot_break_the_header(client):
     assert ";x=y" not in disposition
 
 
+def test_setup_rejects_over_long_password_without_crashing(client_auth):
+    """A password past bcrypt's limit is a clear error, not an internal server error."""
+    resp = client_auth.post(
+        "/api/auth/setup", json={"username": "admin", "password": "x" * 100}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert "72" in body["error"]
+
+
+def test_login_with_over_long_password_is_rejected_not_crashed(client_auth):
+    """An over-long password cannot match any hash, so it fails auth instead of raising."""
+    setup = client_auth.post(
+        "/api/auth/setup", json={"username": "admin", "password": "correcthorse"}
+    )
+    assert setup.json()["success"] is True
+
+    resp = client_auth.post(
+        "/api/auth/login", json={"username": "admin", "password": "x" * 100}
+    )
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["success"] is False
+
+
+def test_setup_rejects_multibyte_password_over_the_byte_limit(client_auth):
+    """The limit is bytes, not characters: 72 multi-byte characters still exceed it."""
+    resp = client_auth.post(
+        "/api/auth/setup", json={"username": "admin", "password": "é" * 72}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is False
+
+
 # --- 08-01 (D-12): strict vendor enum -> automatic 422 at the parse layer -------------------
 
 
