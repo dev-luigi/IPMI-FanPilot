@@ -75,10 +75,12 @@ class ServerConfig:
 
 @dataclass
 class AuthConfig:
-    enabled: bool = True
+    # Only the session lifetime is configurable here. Whether authentication is enabled, and
+    # the brute-force lockout thresholds, are deliberately NOT: the enabled flag lives in the
+    # database so that write access to this file cannot be used to turn the login off, and the
+    # lockout thresholds are fixed in the login path. Keys that do nothing are worse than
+    # absent ones — they read as promises the code does not keep.
     session_expiry: str = "24h"
-    max_login_attempts: int = 5
-    lockout_duration: str = "15m"
 
 
 @dataclass
@@ -128,7 +130,6 @@ def _apply_env_overrides(config: AppConfig) -> None:
         "IPMIDECK_SERVER_HOST": ("server", "host"),
         "IPMIDECK_SERVER_PORT": ("server", "port", int),
         "IPMIDECK_SERVER_FORWARDED_ALLOW_IPS": ("server", "forwarded_allow_ips"),
-        "IPMIDECK_AUTH_ENABLED": ("auth", "enabled", lambda v: v.lower() in ("true", "1", "yes")),
         "IPMIDECK_AUTH_SESSION_EXPIRY": ("auth", "session_expiry"),
         "IPMIDECK_IPMI_POLL_INTERVAL": ("ipmi", "poll_interval", int),
         "IPMIDECK_IPMI_POWER_POLL_INTERVAL": ("ipmi", "power_poll_interval", int),
@@ -227,7 +228,7 @@ def save_default_config(config_path: str | Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     default = {
         "server": {"host": "0.0.0.0", "port": 3000, "https": False},
-        "auth": {"enabled": True, "session_expiry": "24h", "max_login_attempts": 5},
+        "auth": {"session_expiry": "24h"},
         "ipmi": {"poll_interval": 30, "power_poll_interval": 30, "command_timeout": 30},
         "data": {"retention_days": 365, "cleanup_interval": "24h"},
         "logging": {"level": "info"},

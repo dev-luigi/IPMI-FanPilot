@@ -6,8 +6,8 @@ They use the conftest harness fixtures (03-01):
 
   * client_auth — auth ENABLED (DB default auth_enabled="true"): the genuine guarded-route
     fixture used for the 401 -> setup -> 200 flow AND the localized login-failure test.
-  * client      — auth DISABLED via bm.auth.set_auth_enabled(False) AFTER lifespan (REVIEWS
-    HIGH #1: IPMIDECK_AUTH_ENABLED is INERT for the runtime gate, which reads the DB). With
+  * client      — auth DISABLED via bm.auth.set_auth_enabled(False) AFTER lifespan (whether auth
+    is on lives in the DB and has no config/env override). With
     this fixture the guarded /api/servers routes are OPEN (200, not 401).
 
 REVIEWS-driven choices (03-REVIEWS.md):
