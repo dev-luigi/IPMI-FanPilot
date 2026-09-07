@@ -453,6 +453,77 @@ def test_setup_rejects_multibyte_password_over_the_byte_limit(client_auth):
     assert resp.json()["success"] is False
 
 
+def _create_host_guard_server(client, host="192.0.2.70", name="Original"):
+    resp = client.post(
+        "/api/servers",
+        json={
+            "name": name,
+            "host": host,
+            "username": "root",
+            "password": "calvin",
+            "vendor": "dell",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["server_id"]
+
+
+def test_host_change_without_credentials_is_refused(client):
+    """Stored BMC credentials cannot be re-pointed by someone who cannot supply them."""
+    server_id = _create_host_guard_server(client)
+
+    resp = client.put(f"/api/servers/{server_id}", json={"host": "192.0.2.99"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"] == t("credentials_required_for_host_change", "en")
+
+    stored = client.get(f"/api/servers/{server_id}").json()["server"]
+    assert stored["host"] == "192.0.2.70", "the host must not have changed"
+
+
+def test_host_change_with_credentials_succeeds(client):
+    """Re-supplying the credentials is the authorization, so the change goes through."""
+    server_id = _create_host_guard_server(client)
+
+    resp = client.put(
+        f"/api/servers/{server_id}",
+        json={"host": "192.0.2.99", "username": "root", "password": "calvin"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True
+
+    stored = client.get(f"/api/servers/{server_id}").json()["server"]
+    assert stored["host"] == "192.0.2.99"
+
+
+def test_rename_resending_the_same_host_is_not_blocked(client):
+    """The edit form always sends the host, so an unchanged one must not trip the guard."""
+    server_id = _create_host_guard_server(client, name="Before")
+
+    resp = client.put(
+        f"/api/servers/{server_id}",
+        json={"name": "After", "host": "192.0.2.70"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True
+
+    stored = client.get(f"/api/servers/{server_id}").json()["server"]
+    assert stored["name"] == "After"
+    assert stored["host"] == "192.0.2.70"
+
+
+def test_host_change_with_only_a_username_is_refused(client):
+    """Both credentials are required — a username alone proves nothing."""
+    server_id = _create_host_guard_server(client)
+    resp = client.put(
+        f"/api/servers/{server_id}",
+        json={"host": "192.0.2.99", "username": "root"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is False
+
+
 # --- 08-01 (D-12): strict vendor enum -> automatic 422 at the parse layer -------------------
 
 

@@ -194,6 +194,25 @@ async def update_server(server_id: str, body: ServerUpdate, lang: str = Depends(
     if "port" in payload and payload["port"] is not None and payload["port"] != IPMI_PORT:
         return {"success": False, "error": t("unsupported_port", lang)}
 
+    # Re-point stored credentials only when the caller can supply them again.
+    #
+    # The stored BMC username and password are root-equivalent on the hardware and are never
+    # returned by the API. Changing only the host therefore aimed credentials the caller
+    # could not read at a machine of their choosing, and the next poll delivered them there.
+    # Requiring both to be re-sent in the same request makes the ability to redirect them
+    # depend on already knowing them, which a stolen session alone does not provide.
+    #
+    # The comparison is against the STORED host, not against whether the field was sent: the
+    # edit form submits the host on every save, so testing for its presence would reject
+    # ordinary renames.
+    existing = await db.fetchone("SELECT host FROM servers WHERE id = ?", (server_id,))
+    if existing and "host" in payload and payload["host"] != existing["host"]:
+        if not body.username or not body.password:
+            return {
+                "success": False,
+                "error": t("credentials_required_for_host_change", lang),
+            }
+
     updates = []
     params = []
     for field in ["name", "description", "host", "port", "vendor", "color"]:
