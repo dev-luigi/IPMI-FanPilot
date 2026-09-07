@@ -10,6 +10,8 @@ from pathlib import Path
 
 import yaml
 
+from backend.core.crypto import _set_secure_permissions
+
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _DURATION_RE = re.compile(r"^(\d+)([smhd]?)$")
 
@@ -213,6 +215,7 @@ def update_server_yaml(updates: dict, config_path: str | Path | None = None) -> 
     raw["server"] = server
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(raw, f, default_flow_style=False, sort_keys=False)
+    _set_secure_permissions(path)
     return path
 
 
@@ -238,3 +241,4 @@ def save_default_config(config_path: str | Path) -> None:
     }
     with open(path, "w") as f:
         yaml.dump(default, f, default_flow_style=False, sort_keys=False)
+    _set_secure_permissions(path)

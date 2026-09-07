@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.core.auth import require_auth
+from backend.core.crypto import _set_secure_permissions
 from backend.core.csv_export import csv_safe, safe_filename_part
 
 router = APIRouter()
@@ -421,6 +422,11 @@ async def _apply_staging_if_present(config) -> bool:
                     if sc.exists():
                         sc.unlink()
             shutil.move(str(src), str(dest))
+            # Restored files arrive with the mode zipfile gave them on extraction, which
+            # is world-readable, and shutil.move preserves it. Every file a backup carries
+            # is sensitive — the database and the encryption key hold BMC credentials — so
+            # restoring one would otherwise quietly widen its permissions.
+            _set_secure_permissions(dest)
     shutil.rmtree(staging, ignore_errors=True)
     return True
 
