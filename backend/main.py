@@ -341,6 +341,16 @@ async def lifespan(app: FastAPI):
             "in cleartext. Enable https in config.yaml or terminate TLS at a proxy.",
             effective_host,
         )
+    # Until first-run setup completes there is no account, and nothing over HTTP distinguishes
+    # the operator from anyone else who can reach the port: whoever answers the setup wizard
+    # first owns the instance. The window closes on its own the moment setup is completed, so
+    # the fix is to make sure the operator knows it is open rather than to add a mechanism.
+    if not await auth.has_user():
+        logger.warning(
+            "No account configured yet — anyone who can reach %s:%d can complete the setup "
+            "wizard and claim this instance. Finish first-run setup now.",
+            effective_host, effective_port,
+        )
     if config.demo:
         logger.info("Demo mode active — 6 virtual servers (one per vendor) with simulated data")
 
